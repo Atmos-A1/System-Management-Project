@@ -5,6 +5,7 @@ decides whether a specific requested action may proceed. This module never
 executes process-control operations.
 """
 from dataclasses import dataclass
+import os
 from typing import Any, Mapping, Optional
 
 from ..domain.models import (
@@ -43,7 +44,7 @@ class ProcessAuthorizationPolicy:
 
     def __init__(self, panther_pid: Optional[int] = None,
                  protected_identities=()):
-        self.panther_pid = panther_pid
+        self.panther_pid = os.getpid() if panther_pid is None else panther_pid
         self.protected_identities = frozenset(protected_identities)
 
     def evaluate(
