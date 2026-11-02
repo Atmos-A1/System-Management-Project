@@ -5,7 +5,7 @@ Displays evidence-based recommendations with impact, risk, and actions.
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QScrollArea, QFrame, 
-    QHBoxLayout
+    QHBoxLayout, QPushButton
 )
 from PySide6.QtCore import Qt, QTimer
 
@@ -20,8 +20,10 @@ from ..services.system_monitor import (
 
 
 class RecommendationCard(QFrame):
-    def __init__(self, rec):
+    def __init__(self, rec, navigate_callback=None):
         super().__init__()
+        self.rec = rec
+        self.navigate_callback = navigate_callback
         self.setObjectName("recCard")
         impact = rec.get('impact', 'Medium')
         accent = "#2563eb"
@@ -39,7 +41,12 @@ class RecommendationCard(QFrame):
                 border: 1px solid #e5e7eb;
                 border-left: 4px solid {accent};
             }}
+            QFrame#recCard:hover {{
+                border: 1px solid #93c5fd;
+                border-left: 4px solid {accent};
+            }}
         """)
+        self.setCursor(Qt.PointingHandCursor)
         
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 16)
@@ -103,7 +110,20 @@ class RecommendationCard(QFrame):
             conf.setStyleSheet("color: #6b7280; font-size: 11px;")
             footer.addWidget(conf)
         footer.addStretch()
+        go_btn = QPushButton("Go to fix →")
+        go_btn.setStyleSheet("padding: 6px 10px; border-radius: 6px; background-color: #f3f4f6; color: #111827; border: 1px solid #d1d5db;")
+        go_btn.clicked.connect(self._go_to_fix)
+        footer.addWidget(go_btn)
         layout.addLayout(footer)
+    
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._go_to_fix()
+        super().mousePressEvent(event)
+    
+    def _go_to_fix(self):
+        if self.navigate_callback:
+            self.navigate_callback(self.rec)
 
 
 class RecommendationsScreen(QWidget):
@@ -163,6 +183,46 @@ class RecommendationsScreen(QWidget):
         except Exception:
             return {"cpu_percent": 0, "ram_percent": 0, "disk_percent": 0, "battery_percent": None}
 
+    def navigate_to_fix(self, rec):
+        category = (rec.get('category') or '').lower()
+        issue = (rec.get('issue') or '').lower()
+        # Try to find parent window/main window
+        parent = self.window()
+        if hasattr(parent, 'sidebar') and hasattr(parent, 'stack'):
+            # Map by index based on NAV_ITEMS order
+            from .navigation import NAV_ITEMS
+            target = None
+            if 'process' in category or 'cpu' in issue or 'memory' in issue or 'ram' in issue:
+                target = "Processes"
+            elif 'storage' in category or 'disk' in issue:
+                target = "Storage"
+            elif 'power' in category or 'battery' in issue:
+                target = "Battery"
+            elif 'startup' in issue:
+                target = "Startup Apps"
+            # Find index
+            for i, (name, _icon) in enumerate(NAV_ITEMS):
+                if name == target:
+                    parent.sidebar.setCurrentRow(i)
+                    parent.stack.setCurrentIndex(i)
+                    return
+        # Fallback: try common indices
+        if 'process' in category or 'cpu' in issue:
+            try:
+                parent.sidebar.setCurrentRow(1)  # Processes
+            except Exception:
+                pass
+        elif 'storage' in category or 'disk' in issue:
+            try:
+                parent.sidebar.setCurrentRow(2)  # Storage
+            except Exception:
+                pass
+        elif 'power' in category or 'battery' in issue:
+            try:
+                parent.sidebar.setCurrentRow(3)  # Battery
+            except Exception:
+                pass
+
     def refresh(self):
         for i in reversed(range(self.content_layout.count())):
             item = self.content_layout.itemAt(i)
@@ -179,7 +239,7 @@ class RecommendationsScreen(QWidget):
             self.content_layout.addWidget(no_rec)
         else:
             for rec in recs:
-                card = RecommendationCard(rec)
+                card = RecommendationCard(rec, navigate_callback=self.navigate_to_fix)
                 self.content_layout.addWidget(card)
         
         self.content_layout.addStretch()

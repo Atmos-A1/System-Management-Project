@@ -89,17 +89,55 @@ class MainWindow(QMainWindow):
             "Settings": SettingsScreen,
         }
 
+        self._screen_classes = _screen_map
+        self._screen_widgets = {}
         for name, _icon in NAV_ITEMS:
             cls = _screen_map.get(name)
             if cls is not None:
-                widget = cls()
+                # Lazy load - create widgets on demand for performance
+                self.stack.addWidget(QWidget())  # placeholder
             else:
                 placeholder = QLabel(f"{name} screen - coming soon")
                 placeholder.setAlignment(Qt.AlignCenter)
-                widget = placeholder
-            self.stack.addWidget(widget)
+                self.stack.addWidget(placeholder)
 
         layout.addWidget(self.stack)
 
-        self.sidebar.currentRowChanged.connect(self.stack.setCurrentIndex)
+        self.sidebar.currentRowChanged.connect(self._on_tab_changed)
         self.sidebar.setCurrentRow(0)
+        # Expose stack for external navigation
+        self.stack_widget = self.stack
+    
+    def _on_tab_changed(self, index):
+        # Lazy load screen if not loaded
+        if index in self._screen_widgets:
+            self.stack.setCurrentIndex(index)
+            return
+        # Find name
+        if index < len(NAV_ITEMS):
+            name, _ = NAV_ITEMS[index]
+            cls = self._screen_classes.get(name)
+            if cls is not None:
+                try:
+                    widget = cls()
+                    old_widget = self.stack.widget(index)
+                    self.stack.removeWidget(old_widget)
+                    try:
+                        old_widget.deleteLater()
+                    except Exception:
+                        pass
+                    self.stack.insertWidget(index, widget)
+                    self._screen_widgets[index] = widget
+                except Exception as e:
+                    placeholder = QLabel(f"Error loading {name}: {e}")
+                    placeholder.setAlignment(Qt.AlignCenter)
+                    old_widget = self.stack.widget(index)
+                    self.stack.removeWidget(old_widget)
+                    try:
+                        old_widget.deleteLater()
+                    except Exception:
+                        pass
+                    self.stack.insertWidget(index, placeholder)
+            self.stack.setCurrentIndex(index)
+        else:
+            self.stack.setCurrentIndex(index)

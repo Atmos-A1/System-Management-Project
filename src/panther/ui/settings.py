@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QScrollArea,
     QMessageBox,
+    QApplication,
 )
 from PySide6.QtCore import Qt
 import os
@@ -68,6 +69,9 @@ class SettingsScreen(QWidget):
             QCheckBox {
                 color: #111827;
             }
+            QLabel {
+                color: #111827;
+            }
         """)
         
         layout = QVBoxLayout(self)
@@ -102,7 +106,11 @@ class SettingsScreen(QWidget):
         self.refresh_spin.setRange(1, 60)
         self.refresh_spin.setValue(config.refresh_interval_seconds)
         self.refresh_spin.setSuffix(" seconds")
+        self.refresh_spin.valueChanged.connect(self._on_interval_changed)
         monitor_layout.addRow("Refresh Interval:", self.refresh_spin)
+        self.interval_info = QLabel("Applies to auto-refreshing screens on next update.")
+        self.interval_info.setStyleSheet("color: #6b7280; font-size: 11px;")
+        monitor_layout.addRow("", self.interval_info)
         monitor_group.setLayout(monitor_layout)
         content_layout.addWidget(monitor_group)
 
@@ -112,8 +120,12 @@ class SettingsScreen(QWidget):
         appearance_layout.setSpacing(10)
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(["Light", "Dark"])
-        self.theme_combo.setCurrentText(config.theme.capitalize())
+        self.theme_combo.setCurrentText(config.theme.capitalize() if config.theme.lower() in ["light", "dark"] else "Light")
+        self.theme_combo.currentTextChanged.connect(self._on_theme_changed)
         appearance_layout.addRow("Theme:", self.theme_combo)
+        self.theme_info = QLabel("Theme changes are applied to the application.")
+        self.theme_info.setStyleSheet("color: #6b7280; font-size: 11px;")
+        appearance_layout.addRow("", self.theme_info)
         appearance_group.setLayout(appearance_layout)
         content_layout.addWidget(appearance_group)
 
@@ -178,6 +190,71 @@ class SettingsScreen(QWidget):
         content_layout.addStretch()
         scroll.setWidget(content)
         layout.addWidget(scroll)
+        self._apply_theme(self.theme_combo.currentText())
+
+    def _on_interval_changed(self, value):
+        try:
+            config.refresh_interval_seconds = int(value)
+            self.interval_info.setText(f"Refresh interval set to {value} seconds (applied to timers).")
+        except Exception as e:
+            self.interval_info.setText(f"Error: {e}")
+
+    def _on_theme_changed(self, theme_text):
+        try:
+            config.theme = theme_text.lower()
+            self._apply_theme(theme_text)
+            self.theme_info.setText(f"{theme_text} theme applied. Restart may be needed for some views.")
+        except Exception as e:
+            self.theme_info.setText(f"Error: {e}")
+
+    def _apply_theme(self, theme_text):
+        app = QApplication.instance()
+        if not app:
+            return
+        if theme_text.lower() == "dark":
+            dark_style = """
+                QMainWindow { background-color: #0f172a; }
+                QWidget { background-color: #0f172a; color: #e5e7eb; }
+                QListWidget { background-color: #020617; color: #cbd5e1; border: none; }
+                QListWidget::item { padding: 11px 22px; border-radius: 8px; margin: 2px 8px; }
+                QListWidget::item:selected { background-color: #2563eb; color: #ffffff; }
+                QListWidget::item:hover:!selected { background-color: #1e293b; color: #ffffff; }
+                QStackedWidget { background-color: #0f172a; }
+                QGroupBox { background-color: #111827; border: 1px solid #1f2937; color: #e5e7eb; border-radius: 10px; margin-top: 12px; padding: 16px; }
+                QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 6px; }
+                QTableView, QTableWidget, QTextEdit { background-color: #111827; color: #e5e7eb; border: 1px solid #1f2937; gridline-color: #1f2937; selection-background-color: #1e40af; }
+                QHeaderView::section { background-color: #0f172a; color: #e5e7eb; border: 1px solid #1f2937; padding: 6px; font-weight: 600; }
+                QLineEdit, QComboBox, QSpinBox { background-color: #111827; color: #e5e7eb; border: 1px solid #374151; padding: 6px 8px; border-radius: 6px; }
+                QPushButton { background-color: #2563eb; color: #ffffff; border: none; padding: 8px 14px; border-radius: 6px; }
+                QPushButton:hover { background-color: #1d4ed8; }
+                QPushButton:pressed { background-color: #1e40af; }
+                QPushButton:disabled { background-color: #475569; }
+                QLabel { color: #e5e7eb; }
+                QScrollArea { background-color: transparent; }
+                QTabWidget::pane { background-color: #111827; border: 1px solid #1f2937; border-radius: 8px; }
+                QTabBar::tab { background-color: #0f172a; color: #cbd5e1; padding: 8px 16px; margin-right: 4px; border-top-left-radius: 6px; border-top-right-radius: 6px; }
+                QTabBar::tab:selected { background-color: #111827; color: #ffffff; border: 1px solid #1f2937; border-bottom: none; }
+                QListWidget { background-color: #111827; color: #e5e7eb; border: 1px solid #1f2937; border-radius: 6px; }
+                QListWidget::item { padding: 8px; border-bottom: 1px solid #1f2937; }
+                QListWidget::item:selected { background-color: #1e40af; color: #ffffff; }
+                QProgressBar { border: none; background-color: #1f2937; border-radius: 4px; }
+                QProgressBar::chunk { background-color: #2563eb; border-radius: 4px; }
+                QSplitter::handle { background-color: #1f2937; }
+                QFrame#card { background-color: #111827; border: 1px solid #1f2937; border-radius: 12px; }
+                QFrame#recCard { background-color: #111827; border: 1px solid #1f2937; }
+            """
+            app.setStyleSheet(dark_style)
+        else:
+            light_style = """
+                QMainWindow { background-color: #f7f9fc; }
+                QWidget { background-color: #f7f9fc; color: #111827; }
+                QListWidget { background-color: #111827; color: #e5e7eb; border: none; }
+                QListWidget::item { padding: 11px 22px; border-radius: 8px; margin: 2px 8px; }
+                QListWidget::item:selected { background-color: #2563eb; color: #ffffff; }
+                QListWidget::item:hover:!selected { background-color: #1f2937; color: #ffffff; }
+                QStackedWidget { background-color: #f7f9fc; }
+            """
+            app.setStyleSheet(light_style)
 
     def open_data_dir(self):
         try:
