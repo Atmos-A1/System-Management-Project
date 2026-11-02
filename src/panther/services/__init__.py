@@ -1,1 +1,1 @@
-"""Service adapters package marker."""
+"""Services package."""
