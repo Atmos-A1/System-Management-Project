@@ -59,5 +59,7 @@ The new and existing tests are committed, but they have not been executed in the
 ## PRD alignment and scope guard
 This remains exclusively the Process and RAM Management module. It advances safe process selection and user-authorized process control. It does not introduce storage cleanup, battery management, startup management, or unrelated system optimisation. RAM intelligence and adaptive allocation remain later work within this same module.
 
-## Next development phase
-Development Phase 5: implement the verified graceful-close action workflow. Use an action-capable Windows process handle with identity revalidation, request normal window closure where supported, wait without silently escalating, verify process exit, close handles on every path, and persist structured outcomes. Keep force termination disabled and separate. Add tests for stale identity, process disappearance, access denial, timeout, no closeable window, successful close, handle cleanup and no false-success outcomes.
+## Phase 4 completion note
+Development Phase 4 policy work is committed. The policy now protects Panther's current PID by default, rejects force termination as out of scope, and has regression coverage for mismatched identity and default self-protection.
+
+See `handoff_phase_14.md` for Development Phase 5 graceful-close implementation and its remaining integration gate.
