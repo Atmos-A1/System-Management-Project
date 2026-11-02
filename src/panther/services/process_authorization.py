@@ -67,10 +67,14 @@ class ProcessAuthorizationPolicy:
             return deny("PROTECTED_PROCESS", "This process name is on Panther's protected list.")
         if verification is None:
             return deny("IDENTITY_NOT_VERIFIED", "A Windows identity verification result is required.")
-        if verification.status is not ProcessVerificationStatus.VERIFIED or not verification.verified:
-            return deny("IDENTITY_NOT_VERIFIED", "Windows did not verify this exact process instance.")
         if verification.requested_identity != identity:
             return deny("IDENTITY_MISMATCH", "The verification result belongs to a different process instance.")
+        if verification.status is not ProcessVerificationStatus.VERIFIED or not verification.verified:
+            return deny("IDENTITY_NOT_VERIFIED", "Windows did not verify this exact process instance.")
+        # Phase 4 authorizes graceful-close requests only. Force termination
+        # receives a separate authorization design and implementation later.
+        if action is not ProcessActionType.REQUEST_GRACEFUL_CLOSE:
+            return deny("ACTION_NOT_IN_PHASE_SCOPE", "Only graceful application closure is in scope for this authorization phase.")
         if not request.confirmed:
             return deny("USER_CONFIRMATION_REQUIRED", "The user has not explicitly confirmed this action.")
         if classification is None:
