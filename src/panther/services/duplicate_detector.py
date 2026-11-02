@@ -29,9 +29,18 @@ class DuplicateDetector:
         """Find duplicate files by content hash."""
         # Group by size first for efficiency
         size_groups = defaultdict(list)
+        seen_ids = set()
         for f in files:
-            if f.get('size', 0) > 0:  # Skip empty files
-                size_groups[f['size']].append(f)
+            if f.get('size', 0) <= 0:  # Skip empty files
+                continue
+            # Hardlinks share one on-disk file: they are not extra copies and
+            # deleting one frees no space, so keep only the first path seen.
+            file_id = (f.get('device'), f.get('inode'))
+            if file_id[1]:
+                if file_id in seen_ids:
+                    continue
+                seen_ids.add(file_id)
+            size_groups[f['size']].append(f)
         
         duplicates = []
         # Only check groups with potential duplicates (2+ files same size)

@@ -46,6 +46,7 @@ def main() -> None:
         "--hidden-import", "PySide6.QtXml",
         "--hidden-import", "psutil",
         "--hidden-import", "sqlite3",
+        "--hidden-import", "send2trash",
         str(entry_point),
     ]
 

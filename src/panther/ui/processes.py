@@ -233,11 +233,12 @@ class ProcessFilterProxyModel(QSortFilterProxyModel):
 
 
 class ProcessesScreen(QWidget):
-    def __init__(self, process_loader=None, process_verifier=None):
+    def __init__(self, process_loader=None, process_verifier=None, process_classifier=None):
         super().__init__()
         self.setObjectName("processesScreen")
         self._process_loader = process_loader or iter_process_records
         self._process_verifier = process_verifier
+        self._process_classifier = process_classifier
         self._load_thread = None
         self._verification_threads = set()
         self._all_rows = []
@@ -389,7 +390,7 @@ class ProcessesScreen(QWidget):
         self.status_label.setText("Loading process information…")
         self._pending_identity = self.selected_identity
         self._snapshot_started = False
-        thread = ProcessLoadThread(self._process_loader, parent=self)
+        thread = ProcessLoadThread(self._process_loader, classifier=self._process_classifier, parent=self)
         thread.batch_ready.connect(self._on_process_batch)
         thread.classification_ready.connect(self._on_classification_batch)
         thread.completed.connect(self._on_loading_complete)

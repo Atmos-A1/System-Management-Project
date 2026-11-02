@@ -270,4 +270,10 @@ class SettingsScreen(QWidget):
             QMessageBox.Yes | QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            QMessageBox.information(self, "Cleared", "Activity history has been cleared.")
+            try:
+                from ..services.history import clear_history
+                removed = clear_history()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Could not clear activity history: {e}")
+                return
+            QMessageBox.information(self, "Cleared", f"Removed {removed} activity history entries.")

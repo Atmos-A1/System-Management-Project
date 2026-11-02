@@ -13,8 +13,8 @@ from typing import Dict, Any, List
 CRITICAL_PROCESSES = {
     'system', 'smss.exe', 'csrss.exe', 'wininit.exe', 'services.exe',
     'lsass.exe', 'winlogon.exe', 'svchost.exe', 'explorer.exe',
-    'dwm.exe', 'fontdrvhost.exe', 'winhost.exe', 'RuntimeBroker.exe',
-    'sihost.exe', 'taskhostw.exe', 'SearchIndexer.exe', 'spoolsv.exe',
+    'dwm.exe', 'fontdrvhost.exe', 'winhost.exe', 'runtimebroker.exe',
+    'sihost.exe', 'taskhostw.exe', 'searchindexer.exe', 'spoolsv.exe',
     'ntoskrnl.exe', 'hal.dll'
 }
 

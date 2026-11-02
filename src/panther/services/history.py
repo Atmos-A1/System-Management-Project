@@ -33,11 +33,18 @@ def record_event(category: str, detail: str) -> None:
     *category* is a short tag like ``"action"`` or ``"metric"``.
     *detail* is a JSON‑serialisable string describing the event.
     """
-    timestamp = datetime.datetime.utcnow().isoformat()
+    # Same stored format as before (naive UTC), without the deprecated utcnow().
+    timestamp = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat()
     db.execute(
         f"INSERT INTO {TABLE_NAME} (ts, category, detail) VALUES (?, ?, ?)",
         (timestamp, category, detail),
     )
+
+def clear_history() -> int:
+    """Delete every history row and return how many were removed."""
+    count = db.fetchall(f"SELECT COUNT(*) AS n FROM {TABLE_NAME}")[0]["n"]
+    db.execute(f"DELETE FROM {TABLE_NAME}")
+    return count
 
 def get_recent(limit: int = 100) -> List[Tuple[int, str, str, str]]:
     """Return the most recent *limit* rows ordered by timestamp descending."""

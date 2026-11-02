@@ -140,9 +140,12 @@ def test_selection_clears_when_pid_is_reused(qtbot):
     snapshots = [[first], [replacement]]
     def loader():
         return snapshots.pop(0) if snapshots else [replacement]
-    screen = ProcessesScreen(process_loader=loader, process_verifier=FakeVerifier())
+    # Inject the classifier: the real one depends on the OS account and install
+    # path, so the fixture would otherwise be hidden as a non-user process.
+    screen = ProcessesScreen(process_loader=loader, process_verifier=FakeVerifier(),
+                             process_classifier=classifier)
     qtbot.addWidget(screen)
-    qtbot.waitUntil(lambda: screen.model.rowCount() == 1 and "Updated" in screen.status_label.text(), timeout=3000)
+    qtbot.waitUntil(lambda: screen.proxy.rowCount() == 1 and "Updated" in screen.status_label.text(), timeout=3000)
     screen.table.selectRow(0)
     assert screen.selected_identity == first.identity
     screen.refresh()

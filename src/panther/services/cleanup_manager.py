@@ -15,6 +15,35 @@ except ImportError:
     HAS_SEND2TRASH = False
 
 
+_PROTECTED_ENV_VARS = ("WINDIR", "SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData")
+
+
+def protected_roots() -> List[str]:
+    """Locations cleanup must never touch (PRD 5.3: protected locations).
+
+    Evaluated at call time so the environment is always current.
+    """
+    roots = []
+    for var in _PROTECTED_ENV_VARS:
+        value = os.environ.get(var)
+        if value:
+            roots.append(os.path.normcase(os.path.realpath(value)))
+    return roots
+
+
+def is_protected_path(path: str) -> bool:
+    """True if *path* is, or is inside, a protected location.
+
+    The real path is used so ``..`` segments and symlinks pointing into a
+    protected folder cannot be used to bypass the check.
+    """
+    real = os.path.normcase(os.path.realpath(path))
+    for root in protected_roots():
+        if real == root or real.startswith(root.rstrip(os.sep) + os.sep):
+            return True
+    return False
+
+
 class CleanupManager:
     def __init__(self, audit_log=None):
         self.audit_log = audit_log or []
@@ -42,6 +71,9 @@ class CleanupManager:
         results = {"success": [], "failed": []}
         for path in file_paths:
             try:
+                if is_protected_path(path):
+                    results["failed"].append((path, "Protected location - not eligible for cleanup"))
+                    continue
                 if not os.path.exists(path):
                     results["failed"].append((path, "File does not exist"))
                     continue
@@ -66,6 +98,9 @@ class CleanupManager:
         results = {"success": [], "failed": []}
         for path in file_paths:
             try:
+                if is_protected_path(path):
+                    results["failed"].append((path, "Protected location - not eligible for cleanup"))
+                    continue
                 if not os.path.exists(path):
                     results["failed"].append((path, "File does not exist"))
                     continue
