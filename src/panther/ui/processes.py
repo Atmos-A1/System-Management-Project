@@ -284,7 +284,7 @@ class ProcessesScreen(QWidget):
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search applications…")
         self.search_input.setClearButtonEnabled(True)
-        self.search_input.setAccessibleName("Search processes")
+        self.search_input.setAccessibleName("Search applications")
         self.filter_combo = QComboBox()
         self.filter_combo.addItems(["All user applications",
                                     "High Memory (>100 MiB)", "High CPU (>10%)"])
@@ -332,19 +332,21 @@ class ProcessesScreen(QWidget):
         details.setObjectName("card")
         dlayout = QVBoxLayout(details)
         dlayout.setContentsMargins(14, 14, 14, 14)
-        self.details_name = QLabel("Select a process")
+        self.details_name = QLabel("Select an application")
         self.details_name.setWordWrap(True)
         self.details_text = QLabel("Select an application to inspect resource usage, executable and classification.")
         self.details_text.setWordWrap(True)
         self.details_text.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.verification_label = QLabel("Identity verification has not been requested.")
         self.verification_label.setWordWrap(True)
-        self.action_notice = QLabel("Process actions are disabled until identity-safe authorization is implemented.")
+        self.action_notice = QLabel("Application closing is not enabled yet. A user-application classification does not prove that closing is consequence-free.")
         self.action_notice.setWordWrap(True)
         self.close_btn, self.force_kill_btn = QPushButton("Close application"), QPushButton("Force stop")
+        # Force stop is intentionally absent from the Version 1 interface.
+        self.force_kill_btn.hide()
         for button in (self.close_btn, self.force_kill_btn):
             button.setEnabled(False)
-            button.setToolTip("Unavailable until identity-safe authorization and verified actions are implemented.")
+            button.setToolTip("Unavailable until the graceful-close safety and verification work is complete.")
             button.clicked.connect(self._explain_actions_unavailable)
         for widget in (self.details_name, self.details_text, self.verification_label,
                        self.action_notice, self.close_btn, self.force_kill_btn):
