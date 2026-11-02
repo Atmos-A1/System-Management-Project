@@ -1,4 +1,6 @@
-# Phase 13 – Process Action Authorization Policy (No Execution)
+# Development Phase 4 – Process Action Authorization Policy (No Execution)
+
+> Repository handoff filename retained for continuity. This is development Phase 4, not Phase 13. The active product goal remains the Process and RAM Management module of Panther.
 
 ## Objective
 Introduce an independent, deny-by-default authorization decision for process actions. This phase separates process classification from permission. It does not execute graceful close, force termination, suspension, priority changes or other process-control operations.
@@ -45,5 +47,17 @@ Tests use pure policy objects and fake verification results. They do not termina
 ## Safety and PRD alignment
 This phase enforces least privilege, explicit confirmation, unknown-process blocking and separation of classification from authorization. It does not make the legacy PID-only process action manager safe. The Process Explorer action buttons must remain disabled until a later phase implements a verified action-handle lifecycle, graceful close, exit verification and structured audit results.
 
-## Next
-Phase 14 should implement a query/action adapter design review and safe action-result workflow. Before any real process-control operation is enabled, tests must cover stale identity, handle lifetime, access denial, timeout, process exit and verified outcomes. Force termination must remain separate and explicit; no automatic termination is permitted.
+## Phase 4 implementation update
+- Authorization now reports a verification result for a different ProcessIdentity as IDENTITY_MISMATCH before evaluating its verification status.
+- This phase authorizes graceful-close requests only. Force termination is explicitly rejected with ACTION_NOT_IN_PHASE_SCOPE, even if the request is confirmed and all evidence fields are present.
+- Added regression tests for both boundaries.
+- This policy remains side-effect-free: it does not open action handles, send window messages, terminate processes, or change priorities.
+
+## Validation status
+The new and existing tests are committed, but they have not been executed in the current workflow. Run the focused test file and then the complete suite on the Windows development environment. Mocked policy tests do not establish that Windows process actions work.
+
+## PRD alignment and scope guard
+This remains exclusively the Process and RAM Management module. It advances safe process selection and user-authorized process control. It does not introduce storage cleanup, battery management, startup management, or unrelated system optimisation. RAM intelligence and adaptive allocation remain later work within this same module.
+
+## Next development phase
+Development Phase 5: implement the verified graceful-close action workflow. Use an action-capable Windows process handle with identity revalidation, request normal window closure where supported, wait without silently escalating, verify process exit, close handles on every path, and persist structured outcomes. Keep force termination disabled and separate. Add tests for stale identity, process disappearance, access denial, timeout, no closeable window, successful close, handle cleanup and no false-success outcomes.
