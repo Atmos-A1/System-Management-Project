@@ -33,7 +33,7 @@ Do not wire the button or provide a production evidence provider by substituting
 
 ## Process Explorer loading improvement
 
-Updated `ProcessLoadThread` so discovery and classification happen batch-by-batch. The UI receives classified batches while discovery is still running instead of waiting for the complete process snapshot and then performing a second classification pass. Unknown/classification-error rows remain excluded by the existing Version 1 filter.
+Updated `ProcessLoadThread` so discovery and classification happen batch-by-batch. The UI receives classified batches while discovery is still running instead of waiting for the complete process snapshot and then performing a second classification pass. The default batch size was reduced from 50 to 10 so the first useful results can appear sooner. Unknown/classification-error rows remain excluded by the existing Version 1 filter.
 
 Added `tests/test_process_load_incremental.py` to assert that a classified first batch is emitted before discovery finishes.
 
