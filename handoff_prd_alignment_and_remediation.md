@@ -359,18 +359,23 @@ Typed process identity, record, action request/result models and tests. No proce
 ### Phase 10 – Process discovery (implemented and pushed; validation limited)
 Typed discovery API plus legacy dictionary bridge and CPU-time sampling. Phase-specific tests passed in an isolated working copy; full repository and Windows validation remain outstanding.
 
-### Phase 11 – Windows process identity adapter (begin next)
-- Query-only Windows process handle adapter.
-- Verify PID + creation time against the requested ProcessIdentity.
-- Query executable path as supporting metadata.
-- Close handles deterministically.
-- No termination, suspension or priority changes in this phase.
-- Mocked unit tests plus a Windows test against the current process and disposable child process.
-- Do not integrate actions until adapter tests and Windows validation pass.
+### Phase 11 – Windows process identity adapter (implemented; Windows validation outstanding)
+- Query-only Windows process handle adapter verifies PID + creation time and closes handles deterministically.
+- Mocked tests are present; controlled Windows integration is still required.
+
+### Phase 12 – Process Explorer responsiveness and UI integration (pushed; Windows UI validation outstanding)
+- Background process discovery and classification, incremental batches, debounced proxy filtering, fixed row sizing, identity-stable selection and query-only identity verification.
+- Close and force-stop remain disabled. UI tests are present but must run with PySide6/pytest-qt on Windows.
+
+### Phase 13 – Process authorization policy (started; no process actions executed)
+- Deny-by-default policy separates classification from authorization.
+- Requires verified identity, explicit confirmation and independent trust evidence; blocks Panther itself, protected identities and critical process names.
+- Current classifier does not provide the independent trust evidence, so the policy intentionally denies until that evidence adapter exists.
 
 ### Subsequent workstreams (sequence may be adjusted after each review)
-1. Process authorization, classification evidence and safe action verification.
-2. Shared monitoring service and responsive dashboard/process UI.
+1. Complete classifier evidence and validate the authorization policy against real Windows metadata.
+2. Design and test a verified action-handle lifecycle and action-result workflow; keep actions disabled until then.
+3. Shared monitoring service and responsive dashboard/process UI.
 3. Storage scanner and duplicate detection reliability.
 4. Cleanup and recovery safeguards.
 5. Battery and power intelligence.
