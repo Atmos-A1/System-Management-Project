@@ -101,9 +101,9 @@ This work remains part of Process and RAM Management. The intended outcome is a 
 
 Do not expand this sequence into storage cleanup, battery management, startup management or unrelated Windows optimisation.
 
-## Next
+## Subsequent development note
 
-Continue completing Development Phase 5 by implementing the trusted Windows evidence provider, safe Qt background integration and action history. Only after the Phase 5 acceptance gate is met should development move to Development Phase 6 (separate force-stop design), and force-stop must remain disabled until separately reviewed and implemented.
+At the user's direction, the remaining Phase 5 acceptance exercise was skipped and development proceeded to Phase 6. This does not mark Phase 5 production-complete. The Phase 6 service-layer implementation and its limitations are documented in `handoff_phase_15.md`. Force Stop remains hidden and unavailable until trusted evidence, action-worker integration, action history and Windows validation are completed.
 
 
 ## Product scope decision — Process Explorer Version 1
