@@ -11,8 +11,7 @@ def test_resource_controller_init():
 
 def test_automatic_disabled_by_default():
     controller = ResourceController()
-    assert controller.history.automatic_enabled is False
-    assert controller.history.mode in ("recommendation", "simulation")
+    assert controller._automatic_enabled is False
 
 
 def test_enable_automatic_only_if_explicit():

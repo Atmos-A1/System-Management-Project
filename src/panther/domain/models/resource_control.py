@@ -12,7 +12,7 @@ def _utc_now() -> datetime:
 @dataclass(frozen=True)
 class ControlAction:
     id: str
-    action_type: str  # set_priority, restore_priority, adjust_monitoring
+    action_type: str  # set_priority, restore_priority, adjust_monitoring, rollback
     target_pid: Optional[int]
     target_name: Optional[str]
     previous_state: Dict[str, object]
@@ -25,6 +25,9 @@ class ControlAction:
     result: str = "pending"  # pending, success, failed, rolled_back
     error: Optional[str] = None
     verified: bool = False
+    confirmation_status: bool = False
+    identity_key: Optional[tuple] = None
+    executable: Optional[str] = None
     metadata: Dict[str, object] = field(default_factory=dict)
 
 
