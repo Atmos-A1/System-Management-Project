@@ -183,7 +183,7 @@ class ProcessTableModel(QAbstractTableModel):
 class ProcessFilterProxyModel(QSortFilterProxyModel):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.search_text, self.filter_type = "", "All processes"
+        self.search_text, self.filter_type = "", "All user applications"
         self.setDynamicSortFilter(False)
 
     def set_criteria(self, search_text, filter_type):
@@ -197,9 +197,11 @@ class ProcessFilterProxyModel(QSortFilterProxyModel):
             return False
         process, classification = pair
         name, exe = (process.get("name") or "").casefold(), (process.get("exe") or "").casefold()
-        if self.search_text and self.search_text not in name and self.search_text not in exe:
+        # Version 1 is application-focused: never expose system, protected,
+        # background/unknown or unclassified processes in the normal view.
+        if classification.get("category") != "User application":
             return False
-        if self.filter_type == "User Applications" and classification.get("category") != "User application":
+        if self.search_text and self.search_text not in name and self.search_text not in exe:
             return False
         if self.filter_type == "High Memory (>100 MiB)":
             value = process.get("memory_rss")
@@ -257,9 +259,9 @@ class ProcessesScreen(QWidget):
         layout.setSpacing(12)
         top = QHBoxLayout()
         titles = QVBoxLayout()
-        title = QLabel("Processes")
+        title = QLabel("Applications")
         title.setObjectName("title")
-        subtitle = QLabel("Understand active applications and their resource usage.")
+        subtitle = QLabel("Review running user-application candidates and their resource usage.")
         subtitle.setObjectName("muted")
         titles.addWidget(title)
         titles.addWidget(subtitle)
@@ -271,7 +273,7 @@ class ProcessesScreen(QWidget):
         layout.addLayout(top)
 
         metrics = QHBoxLayout()
-        self.process_count_value = self._metric(metrics, "Processes")
+        self.process_count_value = self._metric(metrics, "Applications")
         self.cpu_value = self._metric(metrics, "Process CPU total")
         self.memory_value = self._metric(metrics, "Process memory total")
         self.cpu_value.setToolTip("Sum of process CPU percentages; may exceed 100% on multicore systems.")
@@ -280,11 +282,11 @@ class ProcessesScreen(QWidget):
 
         toolbar = QHBoxLayout()
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Search process name or executable…")
+        self.search_input.setPlaceholderText("Search applications…")
         self.search_input.setClearButtonEnabled(True)
         self.search_input.setAccessibleName("Search processes")
         self.filter_combo = QComboBox()
-        self.filter_combo.addItems(["All processes", "User Applications",
+        self.filter_combo.addItems(["All user applications",
                                     "High Memory (>100 MiB)", "High CPU (>10%)"])
         self.filter_combo.setAccessibleName("Filter processes")
         self.refresh_btn = QPushButton("Refresh")
@@ -322,7 +324,7 @@ class ProcessesScreen(QWidget):
             header.setSectionResizeMode(col, QHeaderView.Fixed)
             self.table.setColumnWidth(col, width)
         self.table.setAlternatingRowColors(True)
-        self.table.setAccessibleName("Running processes")
+        self.table.setAccessibleName("Running user applications")
         self.table.selectionModel().selectionChanged.connect(self._selection_changed)
         splitter.addWidget(self.table)
 
@@ -332,7 +334,7 @@ class ProcessesScreen(QWidget):
         dlayout.setContentsMargins(14, 14, 14, 14)
         self.details_name = QLabel("Select a process")
         self.details_name.setWordWrap(True)
-        self.details_text = QLabel("Select a row to inspect resource usage, executable and classification.")
+        self.details_text = QLabel("Select an application to inspect resource usage, executable and classification.")
         self.details_text.setWordWrap(True)
         self.details_text.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.verification_label = QLabel("Identity verification has not been requested.")
@@ -402,7 +404,7 @@ class ProcessesScreen(QWidget):
         self.model.append_rows(batch)
         self._apply_filters()
         self._update_metrics()
-        self.status_label.setText("Loading processes… {:,} found".format(len(self._all_rows)))
+        self.status_label.setText("Scanning applications…")
 
     def _on_classification_batch(self, start, rows):
         for offset, row in enumerate(rows):
@@ -410,6 +412,7 @@ class ProcessesScreen(QWidget):
                 self._all_rows[start + offset] = row
         self.model.update_classifications(start, rows)
         self.proxy.invalidateFilter()
+        self._update_metrics()
 
     def _on_loading_complete(self, count):
         if not self._snapshot_started:
@@ -418,7 +421,7 @@ class ProcessesScreen(QWidget):
             self.model.set_rows([])
         self._apply_filters()
         self._update_metrics()
-        self.status_label.setText("Updated · {:,} processes".format(count))
+        self.status_label.setText("Updated · {:,} applications".format(sum(1 for _, c in self._all_rows if c.get("category") == "User application")))
         if self._pending_identity is not None:
             self._restore_selection(self._pending_identity)
         self._pending_identity = None
@@ -436,9 +439,11 @@ class ProcessesScreen(QWidget):
         self.proxy.set_criteria(self.search_input.text(), self.filter_combo.currentText())
 
     def _update_metrics(self):
-        self.process_count_value.setText("{:,}".format(len(self._all_rows)))
-        cpus = [r[0].get("cpu_percent") for r in self._all_rows if r[0].get("cpu_percent") is not None]
-        mems = [r[0].get("memory_rss") for r in self._all_rows if r[0].get("memory_rss") is not None]
+        # Totals describe only the user-application candidates visible in V1.
+        applications = [row for row in self._all_rows if row[1].get("category") == "User application"]
+        self.process_count_value.setText("{:,}".format(len(applications)))
+        cpus = [r[0].get("cpu_percent") for r in applications if r[0].get("cpu_percent") is not None]
+        mems = [r[0].get("memory_rss") for r in applications if r[0].get("memory_rss") is not None]
         self.cpu_value.setText("{:.1f}%".format(sum(cpus)) if cpus else "—")
         self.memory_value.setText("{:.0f} MiB".format(sum(mems) / (1024 * 1024)))
 
