@@ -117,7 +117,8 @@ The agreed Version 1 experience is an application-focused resource manager, not 
 - Summary application count, CPU and memory totals describe only those candidates.
 - The initial classifier uses current-user account matching and a plausible application install location as display evidence. This is a conservative candidate filter, not proof that an application is safe to close or that it has no background work.
 - Classifier results must not be treated as action authorization. `can_terminate` remains false for these candidates.
-- Close and force-stop controls remain disabled. This UI scope change does not complete the Phase 5 acceptance gate.
+- The graceful Close control remains disabled until the Phase 5 acceptance gate is complete. The Force Stop control is hidden from the Version 1 interface.
+- This UI scope change does not complete the Phase 5 acceptance gate.
 
 ### Version 2
 An Advanced setting that exposes other/background/system process categories is explicitly deferred to Version 2. Do not add it to the Version 1 interface.
