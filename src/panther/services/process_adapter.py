@@ -142,6 +142,44 @@ def _record_from_info(info: Dict[str, Any], sampled_at: Optional[float] = None) 
     )
 
 
+
+def iter_process_records():
+    """Yield typed process records incrementally from one psutil enumeration.
+
+    The iterator avoids building a second full list before the UI can display
+    rows. Cache pruning occurs only after a complete enumeration; early
+    cancellation does not incorrectly discard still-active process baselines.
+    """
+    if psutil is None:
+        raise RuntimeError("psutil is required for process enumeration")
+    attrs = [
+        "pid", "name", "cpu_times", "memory_info", "ppid", "exe",
+        "username", "create_time", "status", "num_threads",
+    ]
+    active_keys = []
+    completed = False
+    try:
+        for process in psutil.process_iter(attrs):
+            try:
+                record = _record_from_info(process.info)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess,
+                    KeyError, TypeError, ValueError):
+                continue
+            except Exception:
+                continue
+            active_keys.append(record.identity.key)
+            yield record
+        completed = True
+    finally:
+        if completed:
+            _cpu_sampler.retain(active_keys)
+            active = set(active_keys)
+            with _first_seen_lock:
+                for key in tuple(_first_seen_by_identity):
+                    if key not in active:
+                        _first_seen_by_identity.pop(key, None)
+
+
 def _collect_process_records(include_legacy_metadata: bool = False):
     """Collect typed snapshots and optional metadata for legacy callers.
 
