@@ -45,7 +45,7 @@ class ProcessLoadThread(QThread):
     failed = Signal(str)
 
     def __init__(self, loader: Callable = None, classifier: Callable = None,
-                 batch_size: int = 50, parent=None):
+                 batch_size: int = 10, parent=None):
         super().__init__(parent)
         self._loader = loader or iter_process_records
         self._classifier = classifier or ProcessClassifier().classify
