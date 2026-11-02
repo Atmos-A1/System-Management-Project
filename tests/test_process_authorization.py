@@ -163,3 +163,25 @@ def test_force_termination_is_a_distinct_explicit_request():
     )
     assert decision.allowed
     assert decision.action is ProcessActionType.REQUEST_FORCE_TERMINATION
+
+
+def test_force_termination_is_out_of_scope_for_phase_four():
+    identity = make_identity()
+    request = make_request(
+        identity, action=ProcessActionType.REQUEST_FORCE_TERMINATION, confirmed=True
+    )
+    decision = ProcessAuthorizationPolicy().evaluate(
+        request, classification(), verified(identity), evidence()
+    )
+    assert not decision.allowed
+    assert decision.code == "ACTION_NOT_IN_PHASE_SCOPE"
+
+
+def test_verification_for_a_different_identity_is_reported_as_mismatch():
+    identity = make_identity()
+    other = make_identity(created=200.0)
+    decision = ProcessAuthorizationPolicy().evaluate(
+        make_request(identity), classification(), verified(other), evidence()
+    )
+    assert not decision.allowed
+    assert decision.code == "IDENTITY_MISMATCH"
