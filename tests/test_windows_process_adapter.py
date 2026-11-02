@@ -8,7 +8,7 @@ from panther.services.windows_process_adapter import (
 
 
 class FakeBackend:
-    def __init__(self, create_time=100.0, image_path=r"C:\\Apps\\demo.exe"):
+    def __init__(self, create_time=100.0, image_path=r"C:\Apps\demo.exe"):
         self.create_time = create_time
         self.image_path = image_path
         self.closed = []
@@ -29,7 +29,7 @@ class FakeBackend:
 
 
 def identity(pid=1234, create_time=100.0):
-    return ProcessIdentity(pid, create_time, "demo.exe", r"C:\\Apps\\demo.exe")
+    return ProcessIdentity(pid, create_time, "demo.exe", r"C:\Apps\demo.exe")
 
 
 def test_inspect_verifies_matching_process_identity_and_closes_handle():
@@ -39,7 +39,7 @@ def test_inspect_verifies_matching_process_identity_and_closes_handle():
     assert result.status is ProcessVerificationStatus.VERIFIED
     assert result.verified
     assert result.observed_create_time == 100.0
-    assert result.observed_image_path == r"C:\\Apps\\demo.exe"
+    assert result.observed_image_path == r"C:\Apps\demo.exe"
     assert result.handle_closed
     assert backend.opened == [1234]
     assert len(backend.closed) == 1
