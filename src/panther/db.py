@@ -5,6 +5,7 @@ connection pool and automatic table creation for the MVP.
 """
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Iterable, Tuple
 
@@ -23,42 +24,45 @@ class Database:
 
     def _ensure_schema(self) -> None:
         """Create tables required for the MVP if they do not exist."""
-        with self._connect() as conn:
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS settings (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                );
-                """
-            )
-            conn.commit()
+        with closing(self._connect()) as conn:
+            with conn:
+                conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    );
+                    """
+                )
 
     # Simple key/value helper -------------------------------------------------
     def set_setting(self, key: str, value: str) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-                (key, value),
-            )
-            conn.commit()
+        with closing(self._connect()) as conn:
+            with conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO settings (key, value) "
+                    "VALUES (?, ?)",
+                    (key, value),
+                )
 
     def get_setting(self, key: str, default: str | None = None) -> str | None:
-        with self._connect() as conn:
-            cur = conn.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        with closing(self._connect()) as conn:
+            cur = conn.execute(
+                "SELECT value FROM settings WHERE key = ?", (key,)
+            )
             row = cur.fetchone()
             return row["value"] if row else default
 
     # Generic query helpers ---------------------------------------------------
     def fetchall(self, sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             cur = conn.execute(sql, tuple(params))
             return list(cur.fetchall())
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> None:
-        with self._connect() as conn:
-            conn.execute(sql, tuple(params))
-            conn.commit()
+        with closing(self._connect()) as conn:
+            with conn:
+                conn.execute(sql, tuple(params))
 
 # Export a singleton for convenient import
 db = Database()
