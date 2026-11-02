@@ -26,6 +26,9 @@ class DashboardScreen(QWidget):
             QWidget {
                 background-color: #f7f9fc;
             }
+            QLabel {
+                background-color: transparent;
+            }
             QFrame#card {
                 background-color: #ffffff;
                 border-radius: 12px;
@@ -146,10 +149,6 @@ class DashboardScreen(QWidget):
         """)
         
         card_layout.addWidget(title_label)
-        card.value_label = value_label
-        card.detail_label = detail_label
-        card.progress = progress
-        return card
         card_layout.addSpacing(6)
         card_layout.addWidget(value_label)
         card_layout.addWidget(detail_label)

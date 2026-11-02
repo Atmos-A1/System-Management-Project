@@ -24,3 +24,17 @@ def test_dashboard_loads(app):
     assert widget.disk_label.text() != ""
     # Battery may be absent, but label should be set
     assert widget.battery_label.text() != ""
+
+
+def test_cards_actually_render_value_detail_and_progress(app):
+    """Regression: an early `return card` once left the value/detail/progress
+    widgets orphaned, so cards showed only their title."""
+    widget = DashboardScreen()
+    widget.show()
+    widget.refresh()
+    for card in (widget.cpu_card, widget.ram_card, widget.disk_card, widget.battery_card):
+        for child in (card.value_label, card.detail_label, card.progress):
+            assert child.parent() is card, "child widget was never added to the card"
+            assert child.isVisibleTo(widget)
+        assert card.value_label.text() not in ("", "0%") or card is widget.battery_card
+    widget.close()
