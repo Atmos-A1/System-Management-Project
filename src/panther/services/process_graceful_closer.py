@@ -4,6 +4,7 @@ The action handle is opened with query and wait rights only. Panther sends
 WM_CLOSE to visible top-level windows and waits for process exit; it never
 calls TerminateProcess or escalates automatically.
 """
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import os
 from typing import Any, Mapping, Optional
@@ -14,6 +15,45 @@ from ..domain.models import (
 )
 from .process_authorization import ProcessAuthorizationPolicy
 from .windows_process_adapter import WindowsProcessAdapter
+
+
+@dataclass(frozen=True)
+class ProcessAuthorizationEvidence:
+    """Identity-bound evidence returned by a trusted in-process evidence provider."""
+
+    identity: ProcessIdentity
+    source: str
+    collected_at: datetime
+    publisher_verified: bool
+    signature_valid: bool
+    user_owned: bool
+    not_service: bool
+    not_critical: bool
+
+    def __post_init__(self):
+        if not isinstance(self.identity, ProcessIdentity):
+            raise TypeError("identity must be a ProcessIdentity")
+        if not isinstance(self.source, str) or not self.source.strip():
+            raise ValueError("evidence source must be a non-empty string")
+        if not isinstance(self.collected_at, datetime):
+            raise TypeError("collected_at must be a datetime")
+        if self.collected_at.tzinfo is None or self.collected_at.utcoffset() is None:
+            raise ValueError("collected_at must be timezone-aware")
+        for field_name in (
+            "publisher_verified", "signature_valid", "user_owned",
+            "not_service", "not_critical",
+        ):
+            if not isinstance(getattr(self, field_name), bool):
+                raise TypeError("{} must be a boolean".format(field_name))
+
+    def as_mapping(self):
+        return {
+            "publisher_verified": self.publisher_verified,
+            "signature_valid": self.signature_valid,
+            "user_owned": self.user_owned,
+            "not_service": self.not_service,
+            "not_critical": self.not_critical,
+        }
 
 
 class _WindowsGracefulCloseApi:
@@ -129,12 +169,13 @@ class ProcessGracefulCloser:
     """
 
     def __init__(self, backend=None, verifier=None, authorization_policy=None,
-                 timeout_ms=5000):
+                 evidence_provider=None, timeout_ms=5000):
         if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms < 0:
             raise ValueError("timeout_ms must be a non-negative integer")
         self._backend = backend
         self._verifier = verifier or WindowsProcessAdapter()
         self._policy = authorization_policy or ProcessAuthorizationPolicy(panther_pid=os.getpid())
+        self._evidence_provider = evidence_provider
         self._timeout_ms = timeout_ms
 
     def _get_backend(self):
@@ -156,9 +197,7 @@ class ProcessGracefulCloser:
         )
 
     def close(self, request: ProcessActionRequest,
-              classification: Optional[Mapping[str, Any]],
-              authorization_evidence: Optional[Mapping[str, bool]] = None
-              ) -> ProcessActionResult:
+              classification: Optional[Mapping[str, Any]]) -> ProcessActionResult:
         started = datetime.now(timezone.utc)
         if not isinstance(request, ProcessActionRequest):
             raise TypeError("request must be a ProcessActionRequest")
@@ -178,8 +217,42 @@ class ProcessGracefulCloser:
                 started, error_code="IDENTITY_QUERY_FAILED",
             )
 
+        if self._evidence_provider is None:
+            return self._result(
+                request, ProcessActionStatus.REJECTED,
+                "No trusted process-evidence provider is configured; no close request was sent.",
+                started, error_code="EVIDENCE_PROVIDER_UNAVAILABLE",
+            )
+        try:
+            evidence = self._evidence_provider.collect(request.identity)
+        except Exception as exc:
+            return self._result(
+                request, ProcessActionStatus.REJECTED,
+                "Independent process evidence could not be collected: {}".format(exc),
+                started, error_code="EVIDENCE_COLLECTION_FAILED",
+            )
+        if not isinstance(evidence, ProcessAuthorizationEvidence):
+            return self._result(
+                request, ProcessActionStatus.REJECTED,
+                "The evidence provider returned an unsupported result; no close request was sent.",
+                started, error_code="INVALID_EVIDENCE_RESULT",
+            )
+        if evidence.identity != request.identity:
+            return self._result(
+                request, ProcessActionStatus.IDENTITY_MISMATCH,
+                "Authorization evidence belongs to a different process instance.",
+                started, error_code="EVIDENCE_IDENTITY_MISMATCH",
+            )
+        age_seconds = (datetime.now(timezone.utc) - evidence.collected_at.astimezone(timezone.utc)).total_seconds()
+        if age_seconds < 0 or age_seconds > 30:
+            return self._result(
+                request, ProcessActionStatus.REJECTED,
+                "Authorization evidence is stale or has an invalid timestamp.",
+                started, error_code="STALE_EVIDENCE",
+            )
+
         decision = self._policy.evaluate(
-            request, classification, verification, authorization_evidence
+            request, classification, verification, evidence.as_mapping()
         )
         if not decision.allowed:
             status = (ProcessActionStatus.IDENTITY_MISMATCH
@@ -245,6 +318,7 @@ class ProcessGracefulCloser:
         except OSError as exc:
             code = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
             status = (ProcessActionStatus.ACCESS_DENIED if code == 5
+                      else ProcessActionStatus.ALREADY_EXITED if code in (87, 1168, 3)
                       else ProcessActionStatus.FAILED)
             result = self._result(
                 request, status, "Windows process operation failed: {}".format(exc),
