@@ -1,418 +1,513 @@
-"""Process screen - displays running processes with management capabilities.
+"""Responsive Process Explorer with background discovery and identity-aware selection."""
+from datetime import datetime
+from typing import Callable
 
-Shows process list with classification, allows searching/filtering/sorting,
-and provides safe termination options with confirmations.
-"""
-
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QTableView, QPushButton, 
-    QLineEdit, QLabel, QComboBox, QSplitter, QTextEdit, QMessageBox
+from PySide6.QtCore import (
+    QAbstractTableModel, QModelIndex, QSortFilterProxyModel, QThread,
+    QTimer, Qt, Signal,
 )
-from PySide6.QtCore import QAbstractTableModel, Qt, QModelIndex, QTimer, QSortFilterProxyModel
+from PySide6.QtWidgets import (
+    QAbstractItemView, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
+    QLineEdit, QMessageBox, QPushButton, QSplitter, QTableView, QVBoxLayout,
+    QWidget,
+)
 
-from ..services.process_adapter import get_processes
-from ..services.process_classifier import classify_process
-from ..services.process_actions import process_action_manager
-from ..config import config
+from ..domain.models import ProcessIdentity
+from ..services.process_adapter import iter_process_records
+from ..services.process_classifier import ProcessClassifier
+from ..services.windows_process_adapter import (
+    ProcessVerificationResult, ProcessVerificationStatus, WindowsProcessAdapter,
+)
+
+HEADERS = ["Process", "PID", "CPU", "Memory", "Status", "Category"]
+
+
+def _record_to_dict(record):
+    try:
+        started = datetime.fromtimestamp(record.identity.create_time).strftime("%Y-%m-%d %H:%M:%S")
+    except (OverflowError, OSError, ValueError):
+        started = "Unknown"
+    return {
+        "pid": record.identity.pid, "ppid": record.ppid,
+        "name": record.identity.name, "exe": record.identity.exe or "",
+        "username": record.username or "", "status": record.status or "Unknown",
+        "cpu_percent": record.cpu_percent, "memory_rss": record.memory_rss,
+        "memory_vms": record.memory_vms, "create_time": record.identity.create_time,
+        "start_time": started, "num_threads": record.num_threads,
+        "identity": record.identity,
+    }
+
+
+class ProcessLoadThread(QThread):
+    batch_ready = Signal(object)
+    classification_ready = Signal(int, object)
+    completed = Signal(int)
+    failed = Signal(str)
+
+    def __init__(self, loader: Callable = None, classifier: Callable = None,
+                 batch_size: int = 50, parent=None):
+        super().__init__(parent)
+        self._loader = loader or iter_process_records
+        self._classifier = classifier or ProcessClassifier().classify
+        self._batch_size = max(1, int(batch_size))
+
+    def run(self):
+        try:
+            rows, pending = [], []
+            for record in self._loader():
+                if self.isInterruptionRequested():
+                    return
+                process = _record_to_dict(record)
+                placeholder = {
+                    "category": "Classifying…", "risk_level": "Not assessed",
+                    "confidence": 0.0, "explanation": "Classification is pending.",
+                    "evidence": [], "can_terminate": False,
+                }
+                pair = (process, placeholder)
+                rows.append(pair)
+                pending.append(pair)
+                if len(pending) >= self._batch_size:
+                    self.batch_ready.emit(pending)
+                    pending = []
+            if pending:
+                self.batch_ready.emit(pending)
+            for start in range(0, len(rows), self._batch_size):
+                if self.isInterruptionRequested():
+                    return
+                updated = []
+                for process, _ in rows[start:start + self._batch_size]:
+                    try:
+                        result = self._classifier(process)
+                    except Exception as exc:
+                        result = {
+                            "category": "Unknown / unverified", "risk_level": "Unknown",
+                            "confidence": 0.0, "explanation": "Classification unavailable: {}".format(exc),
+                            "evidence": [], "can_terminate": False,
+                        }
+                    updated.append((process, result))
+                self.classification_ready.emit(start, updated)
+            self.completed.emit(len(rows))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class ProcessVerificationThread(QThread):
+    completed = Signal(object, object)
+
+    def __init__(self, identity, adapter=None, parent=None):
+        super().__init__(parent)
+        self.identity = identity
+        self.adapter = adapter or WindowsProcessAdapter()
+
+    def run(self):
+        try:
+            result = self.adapter.inspect(self.identity)
+        except Exception as exc:
+            result = ProcessVerificationResult(
+                ProcessVerificationStatus.QUERY_FAILED, self.identity, detail=str(exc)
+            )
+        self.completed.emit(self.identity, result)
 
 
 class ProcessTableModel(QAbstractTableModel):
-    def __init__(self, processes=None):
-        super().__init__()
-        self.headers = ["PID", "Name", "User", "CPU %", "RAM (MiB)", "Status", "Category", "Executable"]
-        self._processes = processes or []
-        self._classifications = {}
-
-    def set_processes(self, processes):
-        self._processes = processes
-        self._classifications = {}
-        for p in processes:
-            try:
-                self._classifications[p.get('pid')] = classify_process(p)
-            except Exception:
-                self._classifications[p.get('pid')] = {
-                    "category": "Unknown / unverified",
-                    "can_terminate": False,
-                    "risk_level": "Unknown"
-                }
-        self.layoutChanged.emit()
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._rows = []
 
     def rowCount(self, parent=QModelIndex()):
-        return len(self._processes)
+        return 0 if parent.isValid() else len(self._rows)
 
     def columnCount(self, parent=QModelIndex()):
-        return len(self.headers)
-
-    def data(self, index, role=Qt.DisplayRole):
-        if not index.isValid():
-            return None
-        proc = self._processes[index.row()]
-        col = index.column()
-        pid = proc.get('pid')
-        classification = self._classifications.get(pid, {})
-        
-        if role == Qt.DisplayRole:
-            if col == 0:
-                return str(proc.get('pid', ''))
-            elif col == 1:
-                return proc.get('name', '')
-            elif col == 2:
-                user = proc.get('username') or ''
-                return user.split('\\')[-1] if '\\' in user else user
-            elif col == 3:
-                cpu = proc.get('cpu_percent', 0) or 0
-                try:
-                    return f"{float(cpu):.1f}"
-                except Exception:
-                    return "0.0"
-            elif col == 4:
-                try:
-                    return f"{(proc.get('memory_rss', 0) or 0) // (1024**2)}"
-                except Exception:
-                    return "0"
-            elif col == 5:
-                return proc.get('status', '')
-            elif col == 6:
-                return classification.get('category', 'Unknown / unverified')
-            elif col == 7:
-                exe = proc.get('exe') or ''
-                if len(exe) > 60:
-                    return '...' + exe[-57:]
-                return exe
-            return None
-        elif role == Qt.ToolTipRole:
-            if col == 6:
-                return f"Risk: {classification.get('risk_level', 'Unknown')}\n{classification.get('explanation', '')}"
-            elif col == 7:
-                return proc.get('exe') or ''
-        return None
+        return 0 if parent.isValid() else len(HEADERS)
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if orientation == Qt.Horizontal and role == Qt.DisplayRole:
-            return self.headers[section]
-        return super().headerData(section, orientation, role)
+            return HEADERS[section]
+        return None
 
-    def get_process_at(self, row):
-        if 0 <= row < len(self._processes):
-            return self._processes[row]
+    def set_rows(self, rows):
+        self.beginResetModel()
+        self._rows = list(rows)
+        self.endResetModel()
+
+    def append_rows(self, rows):
+        rows = list(rows)
+        if not rows:
+            return
+        first, last = len(self._rows), len(self._rows) + len(rows) - 1
+        self.beginInsertRows(QModelIndex(), first, last)
+        self._rows.extend(rows)
+        self.endInsertRows()
+
+    def update_classifications(self, start, rows):
+        if not rows or start < 0 or start >= len(self._rows):
+            return
+        end = min(start + len(rows), len(self._rows))
+        self._rows[start:end] = list(rows)[:end - start]
+        self.dataChanged.emit(self.index(start, 5), self.index(end - 1, 5),
+                              [Qt.DisplayRole, Qt.ToolTipRole, Qt.UserRole])
+
+    def row(self, index):
+        return self._rows[index] if 0 <= index < len(self._rows) else None
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid() or not 0 <= index.row() < len(self._rows):
+            return None
+        process, classification = self._rows[index.row()]
+        values = (
+            process.get("name") or "Unknown process", process.get("pid"),
+            process.get("cpu_percent"), process.get("memory_rss"),
+            process.get("status") or "Unavailable",
+            classification.get("category", "Unknown / unverified"),
+        )
+        if role == Qt.UserRole:
+            return values[index.column()]
+        if role == Qt.DisplayRole:
+            col, value = index.column(), values[index.column()]
+            if col == 1:
+                return str(value)
+            if col == 2:
+                return "—" if value is None else "{:.1f}%".format(value)
+            if col == 3:
+                return "—" if value is None else "{:.1f} MiB".format(value / (1024 * 1024))
+            return value
+        if role == Qt.ToolTipRole:
+            if index.column() == 0:
+                return process.get("exe") or "Executable path unavailable"
+            if index.column() == 5:
+                return "{}\n{}".format(classification.get("risk_level", "Unknown"),
+                                         classification.get("explanation", ""))
         return None
 
 
+class ProcessFilterProxyModel(QSortFilterProxyModel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.search_text, self.filter_type = "", "All processes"
+        self.setDynamicSortFilter(False)
+
+    def set_criteria(self, search_text, filter_type):
+        self.search_text = (search_text or "").strip().casefold()
+        self.filter_type = filter_type
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row, source_parent):
+        pair = self.sourceModel().row(source_row)
+        if pair is None:
+            return False
+        process, classification = pair
+        name, exe = (process.get("name") or "").casefold(), (process.get("exe") or "").casefold()
+        if self.search_text and self.search_text not in name and self.search_text not in exe:
+            return False
+        if self.filter_type == "User Applications" and classification.get("category") != "User application":
+            return False
+        if self.filter_type == "High Memory (>100 MiB)":
+            value = process.get("memory_rss")
+            if value is None or value <= 100 * 1024 * 1024:
+                return False
+        if self.filter_type == "High CPU (>10%)":
+            value = process.get("cpu_percent")
+            if value is None or value <= 10:
+                return False
+        return True
+
+    def lessThan(self, left, right):
+        a = self.sourceModel().data(left, Qt.UserRole)
+        b = self.sourceModel().data(right, Qt.UserRole)
+        if a is None:
+            return b is not None
+        if b is None:
+            return False
+        if isinstance(a, str) and isinstance(b, str):
+            return a.casefold() < b.casefold()
+        return a < b
+
+
 class ProcessesScreen(QWidget):
-    def __init__(self) -> None:
+    def __init__(self, process_loader=None, process_verifier=None):
         super().__init__()
         self.setObjectName("processesScreen")
+        self._process_loader = process_loader or iter_process_records
+        self._process_verifier = process_verifier
+        self._load_thread = None
+        self._verification_threads = set()
+        self._all_rows = []
+        self._snapshot_started = False
+        self._pending_identity = None
+        self.selected_identity = None
+        self._build_ui()
+        self.refresh_timer = self.startTimer(12000)
+        self.refresh()
+
+    def _build_ui(self):
         self.setStyleSheet("""
-            QWidget {
-                background-color: #f7f9fc;
-            }
-            QTableView {
-                background-color: #ffffff;
-                border: 1px solid #e5e7eb;
-                border-radius: 8px;
-                gridline-color: #f3f4f6;
-                selection-background-color: #dbeafe;
-                selection-color: #111827;
-            }
-            QHeaderView::section {
-                background-color: #f9fafb;
-                padding: 6px;
-                border: none;
-                border-right: 1px solid #e5e7eb;
-                border-bottom: 1px solid #e5e7eb;
-                font-weight: 600;
-            }
-            QLineEdit, QComboBox {
-                padding: 6px 8px;
-                border: 1px solid #d1d5db;
-                border-radius: 6px;
-                background-color: #ffffff;
-            }
-            QPushButton {
-                padding: 7px 12px;
-                border-radius: 6px;
-                background-color: #2563eb;
-                color: #ffffff;
-                border: none;
-            }
-            QPushButton:hover {
-                background-color: #1d4ed8;
-            }
-            QPushButton:pressed {
-                background-color: #1e40af;
-            }
-            QPushButton:disabled {
-                background-color: #9ca3af;
-            }
-            QTextEdit {
-                background-color: #ffffff;
-                border: 1px solid #e5e7eb;
-                border-radius: 8px;
-            }
+          QWidget#processesScreen {background:#f5f7fb;color:#172033}
+          QFrame#card {background:white;border:1px solid #e4e9f1;border-radius:9px}
+          QLabel#title {font-size:22px;font-weight:700}
+          QLabel#muted {color:#68758a}
+          QLineEdit,QComboBox {background:white;border:1px solid #d8dfeb;border-radius:7px;padding:8px}
+          QPushButton {background:#2458c6;color:white;border:0;border-radius:7px;padding:8px 14px}
+          QPushButton:disabled {background:#aab5c6}
+          QTableView {background:white;alternate-background-color:#f8faff;border:1px solid #e4e9f1;
+            selection-background-color:#e3edff;selection-color:#172033;outline:0}
+          QHeaderView::section {background:#f2f5fa;border:0;padding:9px;font-weight:600}
         """)
-        self.all_processes = []
-        
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(24, 24, 24, 24)
-        main_layout.setSpacing(16)
-        
-        header = QLabel("Processes & RAM Management")
-        header.setStyleSheet("font-size: 24px; font-weight: 700; color: #111827;")
-        main_layout.addWidget(header)
-        
-        subtitle = QLabel("Focus on user/app processes affecting RAM. Critical system processes are hidden for safety.")
-        subtitle.setStyleSheet("font-size: 12px; color: #6b7280;")
-        main_layout.addWidget(subtitle)
-        
-        # Top bar with search and filters
-        top_bar = QHBoxLayout()
-        top_bar.setSpacing(10)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
+        top = QHBoxLayout()
+        titles = QVBoxLayout()
+        title = QLabel("Processes")
+        title.setObjectName("title")
+        subtitle = QLabel("Understand active applications and their resource usage.")
+        subtitle.setObjectName("muted")
+        titles.addWidget(title)
+        titles.addWidget(subtitle)
+        top.addLayout(titles)
+        top.addStretch()
+        self.status_label = QLabel("Preparing process monitor…")
+        self.status_label.setObjectName("muted")
+        top.addWidget(self.status_label)
+        layout.addLayout(top)
+
+        metrics = QHBoxLayout()
+        self.process_count_value = self._metric(metrics, "Processes")
+        self.cpu_value = self._metric(metrics, "Process CPU total")
+        self.memory_value = self._metric(metrics, "Process memory total")
+        self.cpu_value.setToolTip("Sum of process CPU percentages; may exceed 100% on multicore systems.")
+        self.memory_value.setToolTip("Sum of working sets; shared pages can be counted more than once.")
+        layout.addLayout(metrics)
+
+        toolbar = QHBoxLayout()
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Search processes by name...")
-        self.search_input.setFixedWidth(260)
-        self.search_input.textChanged.connect(self.filter_processes)
-        top_bar.addWidget(QLabel("Search:"))
-        top_bar.addWidget(self.search_input)
-        
+        self.search_input.setPlaceholderText("Search process name or executable…")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.setAccessibleName("Search processes")
         self.filter_combo = QComboBox()
-        self.filter_combo.addItems(["All (User)", "User Applications", "High Memory (>100MB)", "High CPU (>10%)"])
-        self.filter_combo.currentTextChanged.connect(self.filter_processes)
-        top_bar.addWidget(QLabel("Filter:"))
-        top_bar.addWidget(self.filter_combo)
-        
+        self.filter_combo.addItems(["All processes", "User Applications",
+                                    "High Memory (>100 MiB)", "High CPU (>10%)"])
+        self.filter_combo.setAccessibleName("Filter processes")
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self.refresh)
-        top_bar.addWidget(self.refresh_btn)
-        top_bar.addStretch()
-        
-        main_layout.addLayout(top_bar)
-        
-        # Splitter for table and details
-        splitter = QSplitter(Qt.Vertical)
-        splitter.setStyleSheet("QSplitter::handle { background-color: #e5e7eb; }")
-        
-        # Table
-        table_widget = QWidget()
-        table_widget.setStyleSheet("background-color: transparent;")
-        table_layout = QVBoxLayout(table_widget)
-        table_layout.setContentsMargins(0, 0, 0, 0)
+        toolbar.addWidget(self.search_input, 3)
+        toolbar.addWidget(self.filter_combo, 1)
+        toolbar.addWidget(self.refresh_btn)
+        layout.addLayout(toolbar)
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.setInterval(140)
+        self._filter_timer.timeout.connect(self._apply_filters)
+        self.search_input.textChanged.connect(lambda *_: self._filter_timer.start())
+        self.filter_combo.currentTextChanged.connect(self._apply_filters)
+
+        splitter = QSplitter(Qt.Horizontal)
         self.table = QTableView()
-        self.table.setSelectionBehavior(QTableView.SelectRows)
-        self.table.setSelectionMode(QTableView.SingleSelection)
-        self.table.setSortingEnabled(True)
-        self.table.clicked.connect(self.show_process_details)
-        self.model = ProcessTableModel()
-        self.proxy = QSortFilterProxyModel()
+        self.table.setObjectName("processTable")
+        self.model = ProcessTableModel(self)
+        self.proxy = ProcessFilterProxyModel(self)
         self.proxy.setSourceModel(self.model)
-        self.proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
-        self.proxy.setFilterKeyColumn(-1)
         self.table.setModel(self.proxy)
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setSortingEnabled(True)
+        self.table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.table.setWordWrap(False)
+        self.table.setTextElideMode(Qt.ElideRight)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(34)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        for col, width in ((1, 78), (2, 86), (3, 112), (4, 92), (5, 176)):
+            header.setSectionResizeMode(col, QHeaderView.Fixed)
+            self.table.setColumnWidth(col, width)
         self.table.setAlternatingRowColors(True)
-        table_layout.addWidget(self.table)
-        splitter.addWidget(table_widget)
-        
-        # Details panel
-        details_widget = QWidget()
-        details_widget.setStyleSheet("background-color: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px;")
-        details_layout = QVBoxLayout(details_widget)
-        details_layout.setContentsMargins(16, 12, 16, 12)
-        details_layout.setSpacing(10)
-        details_label = QLabel("Process Details & Actions")
-        details_label.setStyleSheet("font-weight: 600; font-size: 13px; color: #111827;")
-        details_layout.addWidget(details_label)
-        
-        self.details_text = QTextEdit()
-        self.details_text.setReadOnly(True)
-        self.details_text.setMinimumHeight(130)
-        details_layout.addWidget(self.details_text)
-        
-        # Action buttons
-        actions_layout = QHBoxLayout()
-        actions_layout.setSpacing(10)
-        self.close_btn = QPushButton("Close Application (Graceful)")
-        self.close_btn.clicked.connect(self.close_selected_process)
-        self.force_kill_btn = QPushButton("Force Kill (Advanced)")
-        self.force_kill_btn.clicked.connect(self.force_kill_selected_process)
-        self.force_kill_btn.setStyleSheet("padding: 7px 12px; border-radius: 6px; background-color: #dc2626; color: #ffffff; border: none;")
-        actions_layout.addWidget(self.close_btn)
-        actions_layout.addWidget(self.force_kill_btn)
-        actions_layout.addStretch()
-        details_layout.addLayout(actions_layout)
-        
-        splitter.addWidget(details_widget)
-        splitter.setSizes([420, 160])
-        main_layout.addWidget(splitter)
-        
-        # Timer for auto-refresh
-        self.timer = QTimer(self)
-        self.timer.setInterval(config.refresh_interval_seconds * 1000)
-        self.timer.timeout.connect(self.refresh)
-        self.timer.start()
-        self.refresh()
-        self.selected_pid = None
-        self.selected_proc = None
+        self.table.setAccessibleName("Running processes")
+        self.table.selectionModel().selectionChanged.connect(self._selection_changed)
+        splitter.addWidget(self.table)
+
+        details = QFrame()
+        details.setObjectName("card")
+        dlayout = QVBoxLayout(details)
+        dlayout.setContentsMargins(14, 14, 14, 14)
+        self.details_name = QLabel("Select a process")
+        self.details_name.setWordWrap(True)
+        self.details_text = QLabel("Select a row to inspect resource usage, executable and classification.")
+        self.details_text.setWordWrap(True)
+        self.details_text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.verification_label = QLabel("Identity verification has not been requested.")
+        self.verification_label.setWordWrap(True)
+        self.action_notice = QLabel("Process actions are disabled until identity-safe authorization is implemented.")
+        self.action_notice.setWordWrap(True)
+        self.close_btn, self.force_kill_btn = QPushButton("Close application"), QPushButton("Force stop")
+        for button in (self.close_btn, self.force_kill_btn):
+            button.setEnabled(False)
+            button.setToolTip("Unavailable until identity-safe authorization and verified actions are implemented.")
+            button.clicked.connect(self._explain_actions_unavailable)
+        for widget in (self.details_name, self.details_text, self.verification_label,
+                       self.action_notice, self.close_btn, self.force_kill_btn):
+            dlayout.addWidget(widget)
+        dlayout.addStretch()
+        splitter.addWidget(details)
+        splitter.setStretchFactor(0, 4)
+        splitter.setStretchFactor(1, 2)
+        layout.addWidget(splitter, 1)
+
+    def _metric(self, layout, label):
+        card = QFrame()
+        card.setObjectName("card")
+        box = QVBoxLayout(card)
+        caption, value = QLabel(label), QLabel("—")
+        caption.setObjectName("muted")
+        value.setStyleSheet("font-size:19px;font-weight:700")
+        box.addWidget(caption)
+        box.addWidget(value)
+        layout.addWidget(card)
+        return value
+
+    def timerEvent(self, event):
+        if event.timerId() == self.refresh_timer:
+            self.refresh()
+        else:
+            super().timerEvent(event)
 
     def refresh(self):
-        try:
-            self.all_processes = get_processes()
-            self.filter_processes()
-        except Exception as e:
-            try:
-                self.details_text.setText(f"Error loading processes: {e}")
-            except Exception:
-                pass
+        if self._load_thread is not None and self._load_thread.isRunning():
+            return
+        self.refresh_btn.setEnabled(False)
+        self.status_label.setText("Loading process information…")
+        self._pending_identity = self.selected_identity
+        self._snapshot_started = False
+        thread = ProcessLoadThread(self._process_loader, parent=self)
+        thread.batch_ready.connect(self._on_process_batch)
+        thread.classification_ready.connect(self._on_classification_batch)
+        thread.completed.connect(self._on_loading_complete)
+        thread.failed.connect(self._on_processes_failed)
+        thread.finished.connect(lambda: self._load_finished(thread))
+        self._load_thread = thread
+        thread.start()
 
-    def filter_processes(self):
-        search_text = self.search_input.text().lower()
-        filter_type = self.filter_combo.currentText()
-        
-        system_like = {
-            'system', 'system idle process', 'registry', 'smss.exe', 'csrss.exe',
-            'wininit.exe', 'services.exe', 'lsass.exe', 'winlogon.exe', 'svchost.exe',
-            'dwm.exe', 'fontdrvhost.exe', 'sihost.exe', 'taskhostw.exe', 'runtimebroker.exe'
-        }
-        
-        filtered = []
-        for proc in self.all_processes:
-            name = (proc.get('name') or '').lower()
-            if name in system_like:
-                continue
-            # Also skip if looks like core system
-            if 'ntoskrnl' in name or 'winlogon' in name or 'csrss' in name:
-                continue
-            
-            if search_text and search_text not in name:
-                continue
-            
-            if filter_type == "User Applications":
-                try:
-                    classification = classify_process(proc)
-                    if classification.get('category') != "User application":
-                        continue
-                except Exception:
-                    continue
-            elif filter_type == "High Memory (>100MB)":
-                if (proc.get('memory_rss', 0) or 0) < 100 * 1024 * 1024:
-                    continue
-            elif filter_type == "High CPU (>10%)":
-                try:
-                    if float(proc.get('cpu_percent', 0) or 0) < 10.0:
-                        continue
-                except Exception:
-                    continue
-            
-            filtered.append(proc)
-        
-        try:
-            self.model.set_processes(filtered)
-            self.table.resizeColumnsToContents()
-        except Exception:
-            pass
+    def _load_finished(self, thread):
+        if self._load_thread is thread:
+            self._load_thread = None
+        self.refresh_btn.setEnabled(True)
+        thread.deleteLater()
 
-    def show_process_details(self, index):
-        if not index.isValid():
-            return
-        src_index = self.proxy.mapToSource(index)
-        proc = self.model.get_process_at(src_index.row())
-        if not proc:
-            return
-        self.selected_pid = proc['pid']
-        self.selected_proc = proc
-        try:
-            classification = classify_process(proc)
-        except Exception as e:
-            classification = {"category": "Unknown", "risk_level": "Unknown", "importance": "Unknown", "confidence": 0, "explanation": str(e), "can_terminate": False, "evidence": []}
-        
-        details = []
-        details.append(f"Name: {proc.get('name')}")
-        details.append(f"PID: {proc.get('pid')} | PPID: {proc.get('ppid')}")
-        details.append(f"User: {proc.get('username')}")
-        details.append(f"Status: {proc.get('status')}")
-        details.append(f"CPU: {proc.get('cpu_percent', 0):.1f}% | Memory: {(proc.get('memory_rss', 0) or 0) // (1024**2)} MiB")
-        details.append(f"Started: {proc.get('start_time') or 'Unknown'}")
-        details.append(f"Executable: {proc.get('exe') or 'Unknown'}")
-        details.append(f"\n--- Classification ---")
-        details.append(f"Category: {classification.get('category')}")
-        details.append(f"Risk Level: {classification.get('risk_level')}")
-        details.append(f"Importance: {classification.get('importance')}")
-        details.append(f"Confidence: {classification.get('confidence', 0):.0%}")
-        details.append(f"Can Terminate: {'Yes' if classification.get('can_terminate') else 'No'}")
-        details.append(f"\nExplanation: {classification.get('explanation')}")
-        details.append(f"\nEvidence:")
-        for ev in classification.get('evidence', []):
-            details.append(f"  • {ev}")
-        
-        self.details_text.setText("\n".join(details))
-        
-        if classification.get('can_terminate'):
-            self.close_btn.setEnabled(True)
-            self.force_kill_btn.setEnabled(True)
-        else:
-            self.close_btn.setEnabled(False)
-            self.force_kill_btn.setEnabled(False)
+    def _on_process_batch(self, batch):
+        if not self._snapshot_started:
+            self._snapshot_started = True
+            self._all_rows = []
+            self.model.set_rows([])
+        self._all_rows.extend(batch)
+        self.model.append_rows(batch)
+        self._apply_filters()
+        self._update_metrics()
+        self.status_label.setText("Loading processes… {:,} found".format(len(self._all_rows)))
 
-    def close_selected_process(self):
-        if self.selected_pid is None:
+    def _on_classification_batch(self, start, rows):
+        for offset, row in enumerate(rows):
+            if start + offset < len(self._all_rows):
+                self._all_rows[start + offset] = row
+        self.model.update_classifications(start, rows)
+        self.proxy.invalidateFilter()
+
+    def _on_loading_complete(self, count):
+        if not self._snapshot_started:
+            self._snapshot_started = True
+            self._all_rows = []
+            self.model.set_rows([])
+        self._apply_filters()
+        self._update_metrics()
+        self.status_label.setText("Updated · {:,} processes".format(count))
+        if self._pending_identity is not None:
+            self._restore_selection(self._pending_identity)
+        self._pending_identity = None
+
+    def _on_processes_failed(self, message):
+        self.status_label.setText("Refresh failed · showing last available snapshot")
+        if not self._all_rows:
+            self.details_name.setText("Process list unavailable")
+            self.details_text.setText(message)
+
+    def _apply_filters(self, *_):
+        self.proxy.set_criteria(self.search_input.text(), self.filter_combo.currentText())
+
+    def _update_metrics(self):
+        self.process_count_value.setText("{:,}".format(len(self._all_rows)))
+        cpus = [r[0].get("cpu_percent") for r in self._all_rows if r[0].get("cpu_percent") is not None]
+        mems = [r[0].get("memory_rss") for r in self._all_rows if r[0].get("memory_rss") is not None]
+        self.cpu_value.setText("{:.1f}%".format(sum(cpus)) if cpus else "—")
+        self.memory_value.setText("{:.0f} MiB".format(sum(mems) / (1024 * 1024)))
+
+    def _restore_selection(self, identity):
+        for row in range(self.proxy.rowCount()):
+            source = self.proxy.mapToSource(self.proxy.index(row, 0))
+            pair = self.model.row(source.row())
+            if pair and pair[0].get("identity") == identity:
+                self.table.selectRow(row)
+                return
+        self.selected_identity = None
+        self.details_name.setText("Select a process")
+        self.details_text.setText("The previously selected process is no longer present.")
+        self.verification_label.setText("Selection cleared: process identity no longer exists.")
+
+    def _selection_changed(self, *_):
+        indexes = self.table.selectionModel().selectedRows()
+        if not indexes:
             return
-        proc = self.selected_proc or next((p for p in self.all_processes if p['pid'] == self.selected_pid), None)
-        if not proc:
+        source = self.proxy.mapToSource(indexes[0])
+        pair = self.model.row(source.row())
+        if pair is None:
             return
-        try:
-            classification = classify_process(proc)
-        except Exception:
-            classification = {"category": "Unknown", "risk_level": "Unknown", "explanation": ""}
-        reply = QMessageBox.question(
-            self, "Confirm Close Application",
-            f"Are you sure you want to close {proc['name']} (PID: {proc['pid']})?\n\n"
-            f"Category: {classification['category']}\n"
-            f"Risk: {classification['risk_level']}\n\n"
-            f"{classification['explanation']}\n\n"
-            f"This will attempt a graceful close first.",
-            QMessageBox.Yes | QMessageBox.No
+        process, classification = pair
+        identity = process.get("identity")
+        if not isinstance(identity, ProcessIdentity):
+            self.selected_identity = None
+            return
+        self.selected_identity = identity
+        cpu, memory = process.get("cpu_percent"), process.get("memory_rss")
+        self.details_name.setText("{} · PID {}".format(process.get("name"), identity.pid))
+        self.details_text.setText(
+            "User: {user}\nStatus: {status}\nCPU: {cpu}\nMemory: {memory}\n"
+            "Category: {category}\nRisk: {risk}\nExecutable: {exe}\n\n{explanation}".format(
+                user=process.get("username") or "Unavailable",
+                status=process.get("status") or "Unavailable",
+                cpu="Unavailable" if cpu is None else "{:.1f}%".format(cpu),
+                memory="Unavailable" if memory is None else "{:.1f} MiB".format(memory / (1024 * 1024)),
+                category=classification.get("category", "Unknown"),
+                risk=classification.get("risk_level", "Unknown"),
+                exe=process.get("exe") or "Unavailable",
+                explanation=classification.get("explanation", ""),
+            )
         )
-        if reply == QMessageBox.Yes:
-            try:
-                result = process_action_manager.graceful_close(self.selected_pid)
-                if result.get('success'):
-                    QMessageBox.information(self, "Success", result.get('message'))
-                    self.refresh()
-                elif result.get('needs_force'):
-                    reply2 = QMessageBox.question(
-                        self, "Process Not Responding",
-                        "The process did not exit gracefully. Try force kill?",
-                        QMessageBox.Yes | QMessageBox.No
-                    )
-                    if reply2 == QMessageBox.Yes:
-                        self.force_kill_selected_process()
-            except Exception as e:
-                QMessageBox.critical(self, "Error", str(e))
+        self.verification_label.setText("Verifying this process instance against Windows…")
+        thread = ProcessVerificationThread(identity, adapter=self._process_verifier, parent=self)
+        thread.completed.connect(self._on_identity_verified)
+        thread.finished.connect(lambda: self._verification_finished(thread))
+        self._verification_threads.add(thread)
+        thread.start()
 
-    def force_kill_selected_process(self):
-        if self.selected_pid is None:
+    def _on_identity_verified(self, identity, result):
+        if identity != self.selected_identity:
             return
-        proc = self.selected_proc or next((p for p in self.all_processes if p['pid'] == self.selected_pid), None)
-        if not proc:
-            return
-        try:
-            classification = classify_process(proc)
-        except Exception:
-            classification = {"category": "Unknown", "risk_level": "Unknown", "explanation": ""}
-        reply = QMessageBox.warning(
-            self, "Confirm Force Kill (Advanced)",
-            f"WARNING: Force killing {proc['name']} (PID: {proc['pid']}) can cause data loss!\n\n"
-            f"Category: {classification['category']}\n"
-            f"Risk: {classification['risk_level']}\n\n"
-            f"{classification['explanation']}\n\n"
-            f"Are you absolutely sure?",
-            QMessageBox.Yes | QMessageBox.No
-        )
-        if reply == QMessageBox.Yes:
-            try:
-                result = process_action_manager.force_kill(self.selected_pid)
-                if result.get('success'):
-                    QMessageBox.information(self, "Success", result.get('message'))
-                    self.refresh()
-            except Exception as e:
-                QMessageBox.critical(self, "Error", str(e))
+        status = getattr(getattr(result, "status", None), "value", "verification_failed")
+        self.verification_label.setText("Identity: {}\n{}".format(status.replace("_", " ").title(),
+                                                                     getattr(result, "detail", "")))
 
+    def _verification_finished(self, thread):
+        self._verification_threads.discard(thread)
+        thread.deleteLater()
+
+    def _explain_actions_unavailable(self):
+        QMessageBox.information(self, "Process actions unavailable",
+            "Process actions remain disabled until identity-safe authorization and verified action handling are complete.")
+
+    def closeEvent(self, event):
+        if self._load_thread is not None and self._load_thread.isRunning():
+            self._load_thread.requestInterruption()
+            self._load_thread.wait(2000)
+        for thread in tuple(self._verification_threads):
+            if thread.isRunning():
+                thread.requestInterruption()
+                thread.wait(1000)
+        super().closeEvent(event)
