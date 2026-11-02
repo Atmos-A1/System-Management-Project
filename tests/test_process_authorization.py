@@ -185,3 +185,14 @@ def test_verification_for_a_different_identity_is_reported_as_mismatch():
     )
     assert not decision.allowed
     assert decision.code == "IDENTITY_MISMATCH"
+
+
+def test_panther_self_protection_uses_current_process_by_default():
+    import os
+
+    identity = make_identity(pid=os.getpid())
+    decision = ProcessAuthorizationPolicy().evaluate(
+        make_request(identity), classification(), verified(identity), evidence()
+    )
+    assert not decision.allowed
+    assert decision.code == "PANTHER_SELF_PROTECTION"
