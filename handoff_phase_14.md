@@ -104,3 +104,26 @@ Do not expand this sequence into storage cleanup, battery management, startup ma
 ## Next
 
 Continue completing Development Phase 5 by implementing the trusted Windows evidence provider, safe Qt background integration and action history. Only after the Phase 5 acceptance gate is met should development move to Development Phase 6 (separate force-stop design), and force-stop must remain disabled until separately reviewed and implemented.
+
+
+## Product scope decision — Process Explorer Version 1
+
+The agreed Version 1 experience is an application-focused resource manager, not a full Task Manager replacement.
+
+### Version 1 display scope
+- The default Process Explorer view displays only processes classified as **User application** candidates.
+- System, protected, unknown, unclassified and other process categories are excluded from the normal view.
+- Search, CPU and memory filters operate only within the user-application candidate list.
+- Summary application count, CPU and memory totals describe only those candidates.
+- The initial classifier uses current-user account matching and a plausible application install location as display evidence. This is a conservative candidate filter, not proof that an application is safe to close or that it has no background work.
+- Classifier results must not be treated as action authorization. `can_terminate` remains false for these candidates.
+- Close and force-stop controls remain disabled. This UI scope change does not complete the Phase 5 acceptance gate.
+
+### Version 2
+An Advanced setting that exposes other/background/system process categories is explicitly deferred to Version 2. Do not add it to the Version 1 interface.
+
+### Safety and limitations
+- A process running as the current user from Program Files or AppData may still be a background helper or perform important work.
+- Unknown ownership, missing executable paths, WindowsApps paths, known service processes and system paths do not qualify for the default user-application view.
+- No process is guaranteed to be consequence-free to close. Unsaved work and background activity remain possible.
+- The trusted Windows evidence provider, action worker, confirmation flow, action history and Windows integration tests listed in the Phase 5 acceptance gate remain outstanding.
