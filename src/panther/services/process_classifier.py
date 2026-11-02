@@ -23,7 +23,6 @@ SYSTEM_PATHS = [
     os.environ.get('WINDIR', r'C:\Windows').lower(),
     r'c:\windows\system32',
     r'c:\windows\syswow64',
-    r'c:\program files\windowsapps',
 ]
 
 # Known Windows services patterns

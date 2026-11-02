@@ -9,6 +9,7 @@ Icons are optional; we use placeholder empty strings for now.
 NAV_ITEMS = [
     ("Dashboard", ""),
     ("Processes", ""),
+    ("Adaptive Control", ""),
     ("Storage", ""),
     ("Battery", ""),
     ("Startup Apps", ""),

@@ -1,226 +1,208 @@
-"""Workload detection service (Phase 7) - corrected."""
-
+"""Non-blocking, timestamped workload measurement and classification."""
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
-import time
 
 try:
     import psutil
-except Exception:
+except Exception:  # pragma: no cover
     psutil = None
 
-from ..domain.models.workload import (
-    ProcessResourceSample,
-    SystemResourceSample,
-    WorkloadClassification,
-)
+from ..domain.models.process_identity import ProcessIdentity
+from ..domain.models.workload import ProcessResourceSample, SystemResourceSample, WorkloadClassification
 
 
 class WorkloadDetector:
     def __init__(self, config: Optional[Dict] = None):
-        default = {
-            "cpu_heavy_threshold": 85.0,
-            "memory_heavy_threshold": 85.0,
-            "cpu_light_threshold": 20.0,
-            "memory_light_threshold": 40.0,
-            "min_samples": 3,
-            "sample_window_seconds": 60,
-            "poll_interval_seconds": 5,
-            "min_samples_for_sustained": 3,
+        defaults = {
+            "cpu_heavy_threshold": 85.0, "memory_heavy_threshold": 85.0,
+            "cpu_light_threshold": 20.0, "memory_light_threshold": 40.0,
+            "min_samples": 3, "sample_window_seconds": 60,
+            "min_observation_seconds": 10, "min_samples_for_sustained": 3,
         }
         if config:
-            default.update(config)
-        self.config = default
-        self._system_samples: deque = deque(maxlen=30)
-        self._process_samples: Dict[tuple, deque] = {}  # (pid, create_time)
-        self._process_identities = {}  # (pid, create_time) -> info
-        self._last_classification: Optional[WorkloadClassification] = None
-        self._last_change_time: Optional[datetime] = None
+            defaults.update(config)
+        self.config = defaults
+        self._system_samples = deque(maxlen=60)
+        self._process_samples: Dict[tuple, deque] = {}
+        self._process_identities = {}
+        self._system_cpu_primed = False
+        self._process_cpu_primed = set()
+        self._last_classification = None
 
     def sample_system(self) -> Optional[SystemResourceSample]:
-        """Non-blocking style - call from background worker only."""
+        """Take one non-blocking sample; the first CPU reading is unavailable."""
         if psutil is None:
             return None
         try:
-            cpu = psutil.cpu_percent(interval=None)  # non-blocking
-            mem = psutil.virtual_memory()
+            raw_cpu = psutil.cpu_percent(interval=None)
+            cpu = float(raw_cpu) if self._system_cpu_primed and raw_cpu is not None else None
+            self._system_cpu_primed = True
+            memory = psutil.virtual_memory()
             sample = SystemResourceSample(
-                cpu_percent=float(cpu) if cpu is not None else 0.0,
-                memory_percent=float(mem.percent),
-                memory_available=getattr(mem, "available", None),
-                memory_total=getattr(mem, "total", None),
+                cpu_percent=cpu,
+                memory_percent=float(memory.percent) if memory.percent is not None else None,
+                memory_available=getattr(memory, "available", None),
+                memory_total=getattr(memory, "total", None),
             )
             self._system_samples.append(sample)
             return sample
         except Exception:
             return None
 
-    def sample_processes(self) -> List[ProcessResourceSample]:
-        samples = []
+    def sample_processes(self, cancel_check=None) -> List[ProcessResourceSample]:
+        """Enumerate once, update samples, and prune stale identities from that snapshot."""
         if psutil is None:
-            return samples
+            return []
+        samples, active = [], set()
         try:
-            for proc in psutil.process_iter(["pid", "name", "cpu_percent", "memory_info", "create_time"]):
+            iterator = psutil.process_iter(["pid", "name", "cpu_percent", "memory_info", "create_time", "exe", "username"])
+            cancelled = False
+            for proc in iterator:
+                if cancel_check is not None and cancel_check():
+                    cancelled = True
+                    break
                 try:
                     info = proc.info
-                    pid = info.get("pid")
-                    if pid is None:
+                    pid, created = info.get("pid"), info.get("create_time")
+                    if pid is None or created is None:
                         continue
-                    create_time = info.get("create_time")
-                    if create_time is None:
-                        continue
-                    key = (int(pid), float(create_time))
-                    name = info.get("name") or ""
-                    cpu = info.get("cpu_percent")
+                    key = (int(pid), float(created))
+                    active.add(key)
+                    first_seen = key not in self._process_cpu_primed
+                    self._process_cpu_primed.add(key)
+                    raw_cpu = info.get("cpu_percent")
+                    cpu = None if first_seen or raw_cpu is None or raw_cpu < 0 else float(raw_cpu)
                     mem = info.get("memory_info")
-                    rss = getattr(mem, "rss", None) if mem else None
+                    rss = getattr(mem, "rss", None) if mem is not None else None
+                    rss = int(rss) if rss is not None and rss >= 0 else None
                     sample = ProcessResourceSample(
-                        pid=int(pid),
-                        name=str(name),
-                        cpu_percent=float(cpu) if cpu is not None and cpu >= 0 else None,
-                        memory_rss=int(rss) if rss is not None and rss >= 0 else None,
+                        pid=int(pid), name=str(info.get("name") or "Unknown"),
+                        cpu_percent=cpu, memory_rss=rss, create_time=float(created),
+                        exe=info.get("exe"), username=info.get("username"),
                     )
                     samples.append(sample)
-                    if key not in self._process_samples:
-                        self._process_samples[key] = deque(maxlen=15)
-                    self._process_samples[key].append(sample)
-                    self._process_identities[key] = {"name": name, "pid": pid}
+                    self._process_samples.setdefault(key, deque(maxlen=30)).append(sample)
+                    self._process_identities[key] = {"name": sample.name, "exe": sample.exe, "username": sample.username}
                 except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                     continue
                 except Exception:
                     continue
-            # Remove stale
-            active = set((int(p.info.get("pid")), float(p.info.get("create_time"))) 
-                         for p in psutil.process_iter(["pid", "create_time"]) 
-                         if p.info.get("pid") is not None and p.info.get("create_time") is not None)
-            for key in list(self._process_samples):
-                if key not in active:
-                    del self._process_samples[key]
-                    self._process_identities.pop(key, None)
         except Exception:
-            pass
+            return samples
+
+        if cancelled:
+            return samples
+        stale = set(self._process_samples) - active
+        for key in stale:
+            self._process_samples.pop(key, None)
+            self._process_identities.pop(key, None)
+            self._process_cpu_primed.discard(key)
         return samples
 
-    def classify_workload(self) -> WorkloadClassification:
-        if len(self._system_samples) < self.config["min_samples"]:
-            for _ in range(max(0, self.config["min_samples"] - len(self._system_samples))):
-                self.sample_system()
-                time.sleep(0.05)
-
-        if not self._system_samples:
-            return WorkloadClassification(
-                classification="unknown",
-                confidence=0.0,
-                evidence=["No system samples available"],
-                pressure="none",
-                samples_count=0,
-            )
-
-        recent = list(self._system_samples)[-self.config["min_samples"]:]
-        # Filter out None/invalid
-        cpu_vals = [s.cpu_percent for s in recent if s.cpu_percent is not None and s.cpu_percent >= 0]
+    def classify_workload(self, now: Optional[datetime] = None) -> WorkloadClassification:
+        """Classify existing observations only; never sleeps or samples on the caller thread."""
+        now = now or datetime.now(timezone.utc)
+        window = timedelta(seconds=max(1, self.config["sample_window_seconds"]))
+        recent = [s for s in self._system_samples if timedelta(0) <= now - s.timestamp <= window]
+        min_samples = max(1, int(self.config["min_samples"]))
+        cpu_vals = [s.cpu_percent for s in recent if s.cpu_percent is not None]
         mem_vals = [s.memory_percent for s in recent if s.memory_percent is not None]
-        if not cpu_vals or not mem_vals:
-            return WorkloadClassification(
-                classification="unknown",
-                confidence=0.0,
-                evidence=["Insufficient valid measurements"],
-                pressure="none",
-                samples_count=len(recent),
-            )
-        avg_cpu = sum(cpu_vals) / len(cpu_vals)
-        avg_mem = sum(mem_vals) / len(mem_vals)
-        max_cpu = max(cpu_vals)
-        max_mem = max(mem_vals)
-        data_quality = min(1.0, len(cpu_vals) / len(recent))
+        span = (recent[-1].timestamp - recent[0].timestamp).total_seconds() if len(recent) > 1 else 0.0
+        min_span = max(0.0, float(self.config.get("min_observation_seconds", 10)))
+        if len(recent) < min_samples or len(cpu_vals) < min_samples or len(mem_vals) < min_samples or span < min_span:
+            reasons = ["Insufficient fresh observations; classification is unavailable"]
+            if len(cpu_vals) < min_samples:
+                reasons.append("CPU baseline or enough valid CPU samples are not available")
+            if span < min_span:
+                reasons.append("Observation window is too short")
+            return WorkloadClassification("unknown", 0.0, reasons, "unknown", len(recent),
+                metadata={"valid_cpu_samples": len(cpu_vals), "valid_memory_samples": len(mem_vals),
+                          "observation_span_seconds": span})
 
-        evidence = []
-        evidence.append(f"Avg CPU: {avg_cpu:.1f}%, Max: {max_cpu:.1f}% over {len(cpu_vals)} valid samples")
-        evidence.append(f"Avg RAM: {avg_mem:.1f}%, Max: {max_mem:.1f}%")
-        evidence.append(f"Data quality: {data_quality:.0%}")
-
-        cpu_heavy = avg_cpu > self.config["cpu_heavy_threshold"]
-        mem_heavy = avg_mem > self.config["memory_heavy_threshold"]
-        cpu_light = avg_cpu < self.config["cpu_light_threshold"]
-        mem_light = avg_mem < self.config["memory_light_threshold"]
+        avg_cpu, avg_mem = sum(cpu_vals) / len(cpu_vals), sum(mem_vals) / len(mem_vals)
+        max_cpu, max_mem = max(cpu_vals), max(mem_vals)
+        available_ratios = [
+            100.0 * sample.memory_available / sample.memory_total
+            for sample in recent
+            if sample.memory_available is not None and sample.memory_total
+            and sample.memory_total > 0
+        ]
+        avg_available = sum(available_ratios) / len(available_ratios) if available_ratios else None
+        quality = min(1.0, min(len(cpu_vals), len(mem_vals)) / max(min_samples, 1))
+        evidence = [
+            "CPU average {:.1f}% (peak {:.1f}%) over {} valid samples".format(avg_cpu, max_cpu, len(cpu_vals)),
+            "Memory average {:.1f}% (peak {:.1f}%) over {} valid samples".format(avg_mem, max_mem, len(mem_vals)),
+            "Observation span {:.1f}s; data quality {:.0f}%".format(span, quality * 100),
+        ]
+        if avg_available is not None:
+            evidence.append("Available RAM averages {:.1f}% of installed memory".format(avg_available))
+        cpu_heavy = avg_cpu >= self.config["cpu_heavy_threshold"]
+        mem_heavy = (avg_mem >= self.config["memory_heavy_threshold"]
+                     or (avg_available is not None and avg_available <= 10.0))
+        cpu_light = avg_cpu <= self.config["cpu_light_threshold"]
+        mem_light = avg_mem <= self.config["memory_light_threshold"]
 
         if cpu_heavy and mem_heavy:
-            classification = "combined"
-            confidence = min(0.95, 0.7 * data_quality + (avg_cpu + avg_mem - 170) / 200)
-            pressure = "high"
-        elif cpu_heavy and not mem_heavy:
-            classification = "heavy_cpu"
-            confidence = min(0.9, 0.7 * data_quality + (avg_cpu - 85) / 100)
-            pressure = "high" if avg_cpu > 90 else "medium"
-        elif mem_heavy and not cpu_heavy:
-            classification = "heavy_memory"
-            confidence = min(0.9, 0.7 * data_quality + (avg_mem - 85) / 100)
-            pressure = "high" if avg_mem > 90 else "medium"
+            label, pressure = "combined", "high"
+        elif cpu_heavy:
+            label, pressure = "heavy_cpu", "high" if avg_cpu >= 95 else "medium"
+        elif mem_heavy:
+            label, pressure = "heavy_memory", "high" if avg_mem >= 95 else "medium"
         elif cpu_light and mem_light:
-            classification = "idle"
-            confidence = 0.8 * data_quality
-            pressure = "none"
-        elif cpu_light or (avg_cpu < 40 and avg_mem < 70):
-            classification = "light"
-            confidence = 0.75 * data_quality
-            pressure = "none"
-        elif avg_cpu < 70 and avg_mem < 80:
-            classification = "normal_interactive"
-            confidence = 0.8 * data_quality
-            pressure = "low"
+            label, pressure = "idle", "none"
+        elif avg_cpu < 40 and avg_mem < 70:
+            label, pressure = "light", "low"
+        elif avg_cpu < 75 and avg_mem < 85:
+            label, pressure = "normal_interactive", "low"
         else:
-            classification = "unknown"
-            confidence = 0.5 * data_quality
-            pressure = "medium"
+            label, pressure = "unknown", "medium"
 
-        now = datetime.now(timezone.utc)
-        if self._last_classification and self._last_classification.classification != classification:
-            self._last_change_time = now
-            evidence.append(f"Workload changed from {self._last_classification.classification}")
-
+        # Confidence is bounded and tied to completeness and number of observations.
+        count_quality = min(1.0, len(recent) / max(min_samples * 2, 1))
+        confidence = max(0.0, min(0.95, 0.55 * quality + 0.40 * count_quality))
+        if self._last_classification and self._last_classification.classification != label:
+            evidence.append("Workload changed from {}".format(self._last_classification.classification))
         result = WorkloadClassification(
-            classification=classification,
-            confidence=max(0.0, min(1.0, confidence)),
-            evidence=evidence,
-            pressure=pressure,
-            samples_count=len(cpu_vals),
-            metadata={
-                "avg_cpu": avg_cpu,
-                "avg_mem": avg_mem,
-                "max_cpu": max_cpu,
-                "max_mem": max_mem,
-                "data_quality": data_quality,
-            },
+            label, confidence, evidence, pressure, len(recent),
+            metadata={"avg_cpu": avg_cpu, "avg_mem": avg_mem, "max_cpu": max_cpu,
+                      "max_mem": max_mem, "avg_available_percent": avg_available,
+                      "data_quality": quality, "observation_span_seconds": span},
         )
         self._last_classification = result
         return result
 
     def get_sustained_consumers(self, min_duration_seconds: int = 30) -> List[Dict]:
+        """Return measured contributors with PID+creation-time identity, never PID-only targets."""
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(seconds=max(0, min_duration_seconds))
         consumers = []
-        cutoff = datetime.now(timezone.utc) - timedelta(seconds=min_duration_seconds)
-        for key, samples in self._process_samples.items():
-            if not samples:
+        for key, samples in list(self._process_samples.items()):
+            recent = [s for s in samples if cutoff <= s.timestamp <= now]
+            if len(recent) < int(self.config["min_samples_for_sustained"]):
                 continue
-            recent = [s for s in samples if s.timestamp >= cutoff]
-            if len(recent) < self.config["min_samples_for_sustained"]:
+            span = (recent[-1].timestamp - recent[0].timestamp).total_seconds()
+            if span < min_duration_seconds:
                 continue
             cpu_vals = [s.cpu_percent for s in recent if s.cpu_percent is not None]
             mem_vals = [s.memory_rss for s in recent if s.memory_rss is not None]
-            if not cpu_vals or not mem_vals:
+            if not cpu_vals and not mem_vals:
                 continue
-            avg_cpu = sum(cpu_vals) / len(cpu_vals)
-            avg_mem = sum(mem_vals) / len(mem_vals)
-            if avg_cpu > 25 or avg_mem > 300 * 1024 * 1024:
-                pid, ctime = key
-                consumers.append({
-                    "pid": pid,
-                    "create_time": ctime,
-                    "name": recent[-1].name,
-                    "avg_cpu": avg_cpu,
-                    "avg_memory_mb": avg_mem / (1024 * 1024),
-                    "sample_count": len(recent),
-                    "sustained": True,
-                    "key": key,
-                })
-        return sorted(consumers, key=lambda x: (x["avg_memory_mb"], x["avg_cpu"]), reverse=True)
+            avg_cpu = sum(cpu_vals) / len(cpu_vals) if cpu_vals else None
+            avg_mem = sum(mem_vals) / len(mem_vals) if mem_vals else None
+            if not ((avg_cpu is not None and avg_cpu > 25) or
+                    (avg_mem is not None and avg_mem > 300 * 1024 * 1024)):
+                continue
+            pid, created = key
+            info = self._process_identities.get(key, {})
+            identity = ProcessIdentity(pid, created, info.get("name") or recent[-1].name, info.get("exe"))
+            consumers.append({
+                "identity": identity, "pid": pid, "create_time": created,
+                "name": identity.name, "username": info.get("username"), "avg_cpu": avg_cpu,
+                "avg_memory_mb": avg_mem / (1024 * 1024) if avg_mem is not None else None,
+                "sample_count": len(recent), "observation_span_seconds": span,
+                "measurement_quality": min(1.0, len(recent) / max(3, self.config["min_samples_for_sustained"])),
+                "latest_sample": recent[-1].timestamp,
+            })
+        return sorted(consumers, key=lambda item: (
+            item["avg_memory_mb"] or 0, item["avg_cpu"] or 0), reverse=True)

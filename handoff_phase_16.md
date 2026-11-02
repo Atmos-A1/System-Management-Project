@@ -80,3 +80,20 @@ Updated `src/panther/domain/models/__init__.py` to re-export `ProcessActionStatu
    - They are not yet wired into the Qt UI threads.
 3. **Evidence & Process Action Safety**:
    - Force-stop remains fail-closed and hidden in V1 UI pending a production Windows evidence provider.
+
+
+---
+
+## 5. Corrective implementation update (uploaded working copy)
+
+See `PHASES_7_TO_10_CORRECTION_REPORT.md` for the full review and acceptance boundary.
+
+The corrective implementation now:
+- removes synchronous sample manufacturing and duplicate process enumeration from workload detection;
+- requires fresh, sufficiently sampled CPU/RAM observations and keeps missing metrics unavailable;
+- carries PID + creation-time identity with sustained process observations;
+- gates adaptive recommendations on freshness, confidence, and evidence, and never recommends termination;
+- uses a same-handle Windows process identity check for priority changes, a conservative priority allowlist, explicit confirmation, foreground protection for automatic mode, and SQLite action history/confirmed rollback;
+- adds a monitor-first Adaptive Control screen with an unavailable Adaptive Control mode and background sampling.
+
+The local non-Qt suite passes 123 tests and source compilation passes. Qt tests and Windows-native acceptance are still outstanding because this review environment does not include PySide6/pytest-qt and is not Windows. Automatic process control remains disabled in the V1 UI.

@@ -1,5 +1,4 @@
-"""Workload detection models."""
-
+"""Typed resource measurements and workload classifications."""
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
@@ -16,12 +15,15 @@ class ProcessResourceSample:
     cpu_percent: Optional[float]
     memory_rss: Optional[int]
     timestamp: datetime = field(default_factory=_utc_now)
+    create_time: Optional[float] = None
+    exe: Optional[str] = None
+    username: Optional[str] = None
 
 
 @dataclass(frozen=True)
 class SystemResourceSample:
-    cpu_percent: float
-    memory_percent: float
+    cpu_percent: Optional[float]
+    memory_percent: Optional[float]
     memory_available: Optional[int]
     memory_total: Optional[int]
     timestamp: datetime = field(default_factory=_utc_now)
@@ -29,10 +31,10 @@ class SystemResourceSample:
 
 @dataclass(frozen=True)
 class WorkloadClassification:
-    classification: str  # idle, light, normal_interactive, heavy_cpu, heavy_memory, combined, unknown
+    classification: str
     confidence: float
     evidence: List[str]
-    pressure: str  # none, low, medium, high
+    pressure: str
     samples_count: int
     timestamp: datetime = field(default_factory=_utc_now)
     metadata: Dict[str, object] = field(default_factory=dict)

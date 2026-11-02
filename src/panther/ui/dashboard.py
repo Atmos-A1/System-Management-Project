@@ -84,6 +84,14 @@ class DashboardScreen(QWidget):
         self.ram_card = self.create_card("Memory (RAM)", "0%")
         self.disk_card = self.create_card("Storage", "0%")
         self.battery_card = self.create_card("Battery", "N/A")
+        self.cpu_label = self.cpu_card.value_label
+        self.ram_label = self.ram_card.value_label
+        self.disk_label = self.disk_card.value_label
+        self.battery_label = self.battery_card.value_label
+        self.cpu_detail_label = self.cpu_card.detail_label
+        self.ram_detail_label = self.ram_card.detail_label
+        self.disk_detail_label = self.disk_card.detail_label
+        self.battery_detail_label = self.battery_card.detail_label
         
         grid.addWidget(self.cpu_card, 0, 0)
         grid.addWidget(self.ram_card, 0, 1)
@@ -106,7 +114,6 @@ class DashboardScreen(QWidget):
         card = QFrame()
         card.setObjectName("card")
         card.setMinimumHeight(170)
-        card.setSizePolicy(card.sizePolicy().horizontalPolicy(), card.sizePolicy().verticalPolicy())
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(22, 18, 22, 18)
         card_layout.setSpacing(10)
@@ -139,6 +146,10 @@ class DashboardScreen(QWidget):
         """)
         
         card_layout.addWidget(title_label)
+        card.value_label = value_label
+        card.detail_label = detail_label
+        card.progress = progress
+        return card
         card_layout.addSpacing(6)
         card_layout.addWidget(value_label)
         card_layout.addWidget(detail_label)
