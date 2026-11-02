@@ -424,7 +424,10 @@ class ProcessesScreen(QWidget):
         self._pending_identity = None
 
     def _on_processes_failed(self, message):
-        self.status_label.setText("Refresh failed · showing last available snapshot")
+        if self._snapshot_started:
+            self.status_label.setText("Partial process list · refresh failed")
+        else:
+            self.status_label.setText("Refresh failed · existing process list retained")
         if not self._all_rows:
             self.details_name.setText("Process list unavailable")
             self.details_text.setText(message)
