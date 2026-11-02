@@ -18,9 +18,9 @@ Introduce an independent, deny-by-default authorization decision for process act
 6. Classification must be available, identify a user application, and not block the action.
 7. Classification alone is insufficient. Independent authorization evidence must affirm publisher verification, valid signature, user ownership, non-service status and non-critical status.
 8. Missing, false or ambiguous evidence denies the request.
-9. Force termination is represented as a separate action type. This phase only authorizes a request; it does not execute it.
+9. Force termination is explicitly rejected in Development Phase 4 with ACTION_NOT_IN_PHASE_SCOPE. It belongs to a separately reviewed future phase.
 
-The current classifier does not produce all independent trust evidence fields. Therefore the policy intentionally denies current processes until a later evidence adapter supplies them. This is safer than treating Program Files/AppData paths or process names as proof of safety.
+The current classifier does not produce all independent trust evidence fields. Therefore the policy intentionally denies current processes until a trusted evidence provider supplies them. This is safer than treating Program Files/AppData paths or process names as proof of safety.
 
 ## Test coverage
 - Missing Windows verification.
@@ -33,8 +33,8 @@ The current classifier does not produce all independent trust evidence fields. T
 - Classifier denial.
 - Missing trust evidence.
 - Each required evidence field individually absent/false.
-- Positive authorization with all evidence present.
-- Force termination remains a distinct explicitly confirmed request.
+- Positive authorization for a confirmed graceful-close request with all evidence present.
+- Force termination is rejected as out of scope.
 
 ## Validation
 Run:
