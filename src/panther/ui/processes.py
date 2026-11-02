@@ -53,40 +53,47 @@ class ProcessLoadThread(QThread):
 
     def run(self):
         try:
-            rows, pending = [], []
-            for record in self._loader():
-                if self.isInterruptionRequested():
-                    return
-                process = _record_to_dict(record)
-                placeholder = {
-                    "category": "Classifying…", "risk_level": "Not assessed",
-                    "confidence": 0.0, "explanation": "Classification is pending.",
-                    "evidence": [], "can_terminate": False,
-                }
-                pair = (process, placeholder)
-                rows.append(pair)
-                pending.append(pair)
-                if len(pending) >= self._batch_size:
-                    self.batch_ready.emit(pending)
-                    pending = []
-            if pending:
-                self.batch_ready.emit(pending)
-            for start in range(0, len(rows), self._batch_size):
-                if self.isInterruptionRequested():
-                    return
-                updated = []
-                for process, _ in rows[start:start + self._batch_size]:
+            pending = []
+            total = 0
+
+            def classify_batch(batch):
+                classified = []
+                for process in batch:
+                    if self.isInterruptionRequested():
+                        return []
                     try:
                         result = self._classifier(process)
                     except Exception as exc:
                         result = {
                             "category": "Unknown / unverified", "risk_level": "Unknown",
-                            "confidence": 0.0, "explanation": "Classification unavailable: {}".format(exc),
+                            "confidence": 0.0,
+                            "explanation": "Classification unavailable: {}".format(exc),
                             "evidence": [], "can_terminate": False,
                         }
-                    updated.append((process, result))
-                self.classification_ready.emit(start, updated)
-            self.completed.emit(len(rows))
+                    classified.append((process, result))
+                return classified
+
+            for record in self._loader():
+                if self.isInterruptionRequested():
+                    return
+                pending.append(_record_to_dict(record))
+                if len(pending) >= self._batch_size:
+                    classified = classify_batch(pending)
+                    if self.isInterruptionRequested():
+                        return
+                    if classified:
+                        self.batch_ready.emit(classified)
+                        total += len(classified)
+                    pending = []
+
+            if pending and not self.isInterruptionRequested():
+                classified = classify_batch(pending)
+                if classified:
+                    self.batch_ready.emit(classified)
+                    total += len(classified)
+
+            if not self.isInterruptionRequested():
+                self.completed.emit(total)
         except Exception as exc:
             self.failed.emit(str(exc))
 
