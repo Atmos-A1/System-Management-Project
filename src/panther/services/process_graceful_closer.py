@@ -90,7 +90,8 @@ class _WindowsGracefulCloseApi:
         self.kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
         self.kernel32.WaitForSingleObject.restype = wintypes.DWORD
 
-        self.user32.EnumWindows.argtypes = [wintypes.WNDENUMPROC, wintypes.LPARAM]
+        self._window_enum_callback = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        self.user32.EnumWindows.argtypes = [self._window_enum_callback, wintypes.LPARAM]
         self.user32.EnumWindows.restype = wintypes.BOOL
         self.user32.GetWindowThreadProcessId.argtypes = [
             wintypes.HWND, ctypes.POINTER(wintypes.DWORD)
@@ -123,7 +124,7 @@ class _WindowsGracefulCloseApi:
     def request_window_close(self, pid):
         windows = []
         c, w = self.ctypes, self.wintypes
-        callback_type = w.WNDENUMPROC
+        callback_type = self._window_enum_callback
 
         def collect(hwnd, _):
             owner_pid = w.DWORD()
@@ -164,8 +165,8 @@ class ProcessGracefulCloser:
     """Authorize and request normal window closure for one exact process instance.
 
     This service is deliberately not connected to the legacy PID-only action
-    manager or Process Explorer buttons. Callers must supply the classification
-    and independent evidence required by the authorization policy.
+    manager or Process Explorer buttons. A trusted evidence provider must be
+    explicitly injected; without one, the service fails closed.
     """
 
     def __init__(self, backend=None, verifier=None, authorization_policy=None,
