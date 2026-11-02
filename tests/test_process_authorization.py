@@ -155,14 +155,14 @@ def test_authorizes_only_after_all_checks_pass():
     assert decision.code == "AUTHORIZED"
 
 
-def test_force_termination_is_a_distinct_explicit_request():
+def test_force_termination_is_rejected_until_its_separate_phase():
     identity = make_identity()
     request = make_request(identity, ProcessActionType.REQUEST_FORCE_TERMINATION, confirmed=True)
     decision = ProcessAuthorizationPolicy().evaluate(
         request, classification(), verified(identity), evidence()
     )
-    assert decision.allowed
-    assert decision.action is ProcessActionType.REQUEST_FORCE_TERMINATION
+    assert not decision.allowed
+    assert decision.code == "ACTION_NOT_IN_PHASE_SCOPE"
 
 
 def test_force_termination_is_out_of_scope_for_phase_four():
