@@ -46,23 +46,30 @@ def test_table_model_preserves_unavailable_metrics(qtbot):
     assert model.data(model.index(0, 3), Qt.DisplayRole) == "—"
 
 
-def test_proxy_filters_search_and_category(qtbot):
+def test_proxy_filters_search_and_always_hides_non_user_processes(qtbot):
     model = ProcessTableModel()
     rows = []
-    for record in (make_record(), make_record(102, "worker.exe", 2.0)):
+    for record in (make_record(), make_record(102, "worker.exe", 2.0),
+                   make_record(103, "service.exe", 4.0)):
         process = {"pid": record.identity.pid, "name": record.identity.name,
                    "exe": record.identity.exe, "cpu_percent": record.cpu_percent,
                    "memory_rss": record.memory_rss, "status": record.status,
                    "identity": record.identity}
-        rows.append((process, classifier(process)))
+        classification = classifier(process)
+        if record.identity.pid == 103:
+            classification = dict(classification, category="Important Windows service")
+        rows.append((process, classification))
     model.set_rows(rows)
     proxy = ProcessFilterProxyModel()
     proxy.setSourceModel(model)
-    proxy.set_criteria("editor", "All processes")
+    assert proxy.filter_type == "All user applications"
+    proxy.set_criteria("editor", "All user applications")
     assert proxy.rowCount() == 1
-    proxy.set_criteria("", "User Applications")
+    proxy.set_criteria("", "All user applications")
     assert proxy.rowCount() == 2
-    proxy.set_criteria("missing", "All processes")
+    proxy.set_criteria("", "High Memory (>100 MiB)")
+    assert proxy.rowCount() == 0
+    proxy.set_criteria("missing", "All user applications")
     assert proxy.rowCount() == 0
 
 
