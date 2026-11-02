@@ -117,3 +117,15 @@ def test_pid_zero_is_rejected_without_opening_handle():
 def test_invalid_identity_type_is_rejected():
     with pytest.raises(TypeError):
         WindowsProcessAdapter(FakeBackend()).inspect({"pid": 1234})
+
+
+def test_invalid_parameter_from_open_process_is_reported_as_already_exited():
+    class StalePidBackend(FakeBackend):
+        def open_process(self, pid):
+            error = OSError(87, "The parameter is incorrect")
+            error.winerror = 87
+            raise error
+
+    result = WindowsProcessAdapter(StalePidBackend()).inspect(identity())
+    assert result.status is ProcessVerificationStatus.ALREADY_EXITED
+    assert not result.verified
