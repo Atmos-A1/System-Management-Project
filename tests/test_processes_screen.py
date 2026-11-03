@@ -1,9 +1,8 @@
-import sys
+import getpass
 from datetime import datetime, timezone
 import threading
 import time
 
-import pytest
 from PySide6.QtCore import Qt
 
 from panther.domain.models import ProcessIdentity, ProcessRecord
@@ -13,10 +12,20 @@ from panther.ui.processes import (
 )
 
 
-def make_record(pid=101, name="editor.exe", cpu=12.5, memory=20 * 1024 * 1024, create_time=100.0):
+def make_record(
+    pid=101,
+    name="editor.exe",
+    cpu=12.5,
+    memory=20 * 1024 * 1024,
+    create_time=100.0,
+    exe=None,
+    username="tester",
+):
     return ProcessRecord(
-        identity=ProcessIdentity(pid, create_time, name, r"C:\Apps\{}".format(name)),
-        ppid=1, username="tester", status="running", cpu_percent=cpu,
+        identity=ProcessIdentity(
+            pid, create_time, name, exe or r"C:\Apps\{}".format(name)
+        ),
+        ppid=1, username=username, status="running", cpu_percent=cpu,
         memory_rss=memory, memory_vms=memory * 2 if memory is not None else None,
         num_threads=4, first_seen=datetime.now(timezone.utc),
     )
@@ -136,17 +145,20 @@ def test_duplicate_refresh_does_not_overlap(qtbot):
     assert len(calls) == 1
 
 
-@pytest.mark.xfail(
-    sys.platform.startswith("linux"),
-    strict=True,
-    reason=(
-        "Known upstream failure on Linux: selected_identity is not set "
-        "after selectRow(0). Windows remains unmarked."
-    ),
-)
 def test_selection_clears_when_pid_is_reused(qtbot):
-    first = make_record(pid=501, create_time=100.0)
-    replacement = make_record(pid=501, create_time=200.0, name="replacement.exe")
+    first = make_record(
+        pid=501,
+        create_time=100.0,
+        exe=r"C:\Program Files\Editor\editor.exe",
+        username=getpass.getuser(),
+    )
+    replacement = make_record(
+        pid=501,
+        create_time=200.0,
+        name="replacement.exe",
+        exe=r"C:\Program Files\Editor\replacement.exe",
+        username=getpass.getuser(),
+    )
     snapshots = [[first], [replacement]]
     def loader():
         return snapshots.pop(0) if snapshots else [replacement]

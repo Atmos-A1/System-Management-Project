@@ -133,7 +133,10 @@ def test_symlink_is_marked_and_not_traversed(tmp_path):
     link_entry = _entry(result, "outside-link")
     assert link_entry["type"] == "link"
     assert link_entry["is_link"] is True
-    assert link_entry["is_reparse"] is False
+    if os.name == "nt":
+        assert link_entry["is_reparse"] is True
+    else:
+        assert link_entry["is_reparse"] is False
     assert {item["name"] for item in result["entries"]} == {
         "outside-link",
         "visible.txt",

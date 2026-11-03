@@ -26,14 +26,14 @@ def _fake_trash(monkeypatch, moved, fail_on=None):
     monkeypatch.setattr(cleanup_module, "send2trash", fake_send2trash)
 
 
-def test_regular_file_is_moved_to_recycle_bin(tmp_path, manager, monkeypatch):
-    target = tmp_path / "file.txt"
+def test_regular_file_is_moved_to_recycle_bin(cleanup_tmp_path, manager, monkeypatch):
+    target = cleanup_tmp_path / "file.txt"
     target.write_text("x")
     moved = []
     _fake_trash(monkeypatch, moved)
 
     result = manager.move_to_recycle_bin(
-        [str(target)], allowed_roots=[str(tmp_path)]
+        [str(target)], allowed_roots=[str(cleanup_tmp_path)]
     )
 
     assert result["success"] is True
@@ -46,16 +46,16 @@ def test_regular_file_is_moved_to_recycle_bin(tmp_path, manager, monkeypatch):
 
 
 def test_directory_and_missing_paths_are_rejected_before_trash(
-    tmp_path, manager, monkeypatch
+    cleanup_tmp_path, manager, monkeypatch
 ):
-    directory = tmp_path / "folder"
+    directory = cleanup_tmp_path / "folder"
     directory.mkdir()
-    missing = tmp_path / "missing.txt"
+    missing = cleanup_tmp_path / "missing.txt"
     moved = []
     _fake_trash(monkeypatch, moved)
 
     result = manager.move_to_recycle_bin(
-        [str(directory), str(missing)], allowed_roots=[str(tmp_path)]
+        [str(directory), str(missing)], allowed_roots=[str(cleanup_tmp_path)]
     )
 
     assert result["success"] is False
@@ -65,8 +65,8 @@ def test_directory_and_missing_paths_are_rejected_before_trash(
     assert all(item["status"] == "rejected" for item in result["outcomes"])
 
 
-def test_default_denies_when_no_allowed_root(manager, tmp_path, monkeypatch):
-    target = tmp_path / "file.txt"
+def test_default_denies_when_no_allowed_root(manager, cleanup_tmp_path, monkeypatch):
+    target = cleanup_tmp_path / "file.txt"
     target.write_text("x")
     moved = []
     _fake_trash(monkeypatch, moved)
@@ -79,19 +79,19 @@ def test_default_denies_when_no_allowed_root(manager, tmp_path, monkeypatch):
     assert "approved scan root" in result["outcomes"][0]["reason"]
 
 
-def test_protected_path_is_rejected(tmp_path, manager, monkeypatch):
-    target = tmp_path / "file.txt"
+def test_protected_path_is_rejected(cleanup_tmp_path, manager, monkeypatch):
+    target = cleanup_tmp_path / "file.txt"
     target.write_text("x")
     moved = []
     _fake_trash(monkeypatch, moved)
     monkeypatch.setattr(
         policy_module,
         "default_protected_roots",
-        lambda windows=None, environ=None: [str(tmp_path)],
+        lambda windows=None, environ=None: [str(cleanup_tmp_path)],
     )
 
     result = manager.move_to_recycle_bin(
-        [str(target)], allowed_roots=[str(tmp_path)]
+        [str(target)], allowed_roots=[str(cleanup_tmp_path)]
     )
 
     assert result["success"] is False
@@ -99,10 +99,10 @@ def test_protected_path_is_rejected(tmp_path, manager, monkeypatch):
     assert "protected" in result["outcomes"][0]["reason"].lower()
 
 
-def test_symlink_is_rejected(tmp_path, manager, monkeypatch):
-    target = tmp_path / "target.txt"
+def test_symlink_is_rejected(cleanup_tmp_path, manager, monkeypatch):
+    target = cleanup_tmp_path / "target.txt"
     target.write_text("x")
-    link = tmp_path / "link.txt"
+    link = cleanup_tmp_path / "link.txt"
     try:
         link.symlink_to(target)
     except (OSError, NotImplementedError) as exc:
@@ -111,7 +111,7 @@ def test_symlink_is_rejected(tmp_path, manager, monkeypatch):
     _fake_trash(monkeypatch, moved)
 
     result = manager.move_to_recycle_bin(
-        [str(link)], allowed_roots=[str(tmp_path)]
+        [str(link)], allowed_roots=[str(cleanup_tmp_path)]
     )
 
     assert result["success"] is False
@@ -120,15 +120,15 @@ def test_symlink_is_rejected(tmp_path, manager, monkeypatch):
 
 
 def test_send2trash_unavailable_never_falls_back_to_delete(
-    tmp_path, manager, monkeypatch
+    cleanup_tmp_path, manager, monkeypatch
 ):
-    target = tmp_path / "file.txt"
+    target = cleanup_tmp_path / "file.txt"
     target.write_text("x")
     monkeypatch.setattr(cleanup_module, "HAS_SEND2TRASH", False)
     monkeypatch.setattr(cleanup_module, "send2trash", None)
 
     result = manager.move_to_recycle_bin(
-        [str(target)], allowed_roots=[str(tmp_path)]
+        [str(target)], allowed_roots=[str(cleanup_tmp_path)]
     )
 
     assert result["success"] is False
@@ -137,16 +137,16 @@ def test_send2trash_unavailable_never_falls_back_to_delete(
     assert "send2trash" in result["error"].lower()
 
 
-def test_per_file_failure_is_reported(tmp_path, manager, monkeypatch):
-    first = tmp_path / "a.txt"
+def test_per_file_failure_is_reported(cleanup_tmp_path, manager, monkeypatch):
+    first = cleanup_tmp_path / "a.txt"
     first.write_text("x")
-    second = tmp_path / "b.txt"
+    second = cleanup_tmp_path / "b.txt"
     second.write_text("y")
     moved = []
     _fake_trash(monkeypatch, moved, fail_on=second)
 
     result = manager.move_to_recycle_bin(
-        [str(first), str(second)], allowed_roots=[str(tmp_path)]
+        [str(first), str(second)], allowed_roots=[str(cleanup_tmp_path)]
     )
 
     assert result["success"] is True
@@ -159,10 +159,10 @@ def test_per_file_failure_is_reported(tmp_path, manager, monkeypatch):
     assert "locked" in result["outcomes"][1]["reason"]
 
 
-def test_revalidates_immediately_before_trash(tmp_path, manager, monkeypatch):
-    first = tmp_path / "a.txt"
+def test_revalidates_immediately_before_trash(cleanup_tmp_path, manager, monkeypatch):
+    first = cleanup_tmp_path / "a.txt"
     first.write_text("x")
-    second = tmp_path / "b.txt"
+    second = cleanup_tmp_path / "b.txt"
     second.write_text("y")
     moved = []
     _fake_trash(monkeypatch, moved)
@@ -180,7 +180,7 @@ def test_revalidates_immediately_before_trash(tmp_path, manager, monkeypatch):
     monkeypatch.setattr(cleanup_module, "send2trash", replace_second)
 
     result = manager.move_to_recycle_bin(
-        [str(first), str(second)], allowed_roots=[str(tmp_path)]
+        [str(first), str(second)], allowed_roots=[str(cleanup_tmp_path)]
     )
 
     assert result["moved"] == 1
@@ -188,8 +188,8 @@ def test_revalidates_immediately_before_trash(tmp_path, manager, monkeypatch):
     assert "symbolic link" in result["outcomes"][1]["reason"].lower()
 
 
-def test_history_records_each_outcome(tmp_path, monkeypatch):
-    target = tmp_path / "file.txt"
+def test_history_records_each_outcome(cleanup_tmp_path, monkeypatch):
+    target = cleanup_tmp_path / "file.txt"
     target.write_text("x")
     moved = []
     _fake_trash(monkeypatch, moved)
@@ -201,7 +201,7 @@ def test_history_records_each_outcome(tmp_path, monkeypatch):
     )
 
     result = manager.move_to_recycle_bin(
-        [str(target)], allowed_roots=[str(tmp_path)]
+        [str(target)], allowed_roots=[str(cleanup_tmp_path)]
     )
 
     assert result["moved"] == 1
@@ -212,9 +212,9 @@ def test_history_records_each_outcome(tmp_path, monkeypatch):
 
 
 def test_history_failure_does_not_change_cleanup_result(
-    tmp_path, monkeypatch
+    cleanup_tmp_path, monkeypatch
 ):
-    target = tmp_path / "file.txt"
+    target = cleanup_tmp_path / "file.txt"
     target.write_text("x")
     moved = []
     _fake_trash(monkeypatch, moved)
@@ -224,7 +224,7 @@ def test_history_failure_does_not_change_cleanup_result(
 
     manager = CleanupManager(history_recorder=failing_recorder)
     result = manager.move_to_recycle_bin(
-        [str(target)], allowed_roots=[str(tmp_path)]
+        [str(target)], allowed_roots=[str(cleanup_tmp_path)]
     )
 
     assert result["success"] is True
@@ -232,8 +232,8 @@ def test_history_failure_does_not_change_cleanup_result(
     assert moved == [str(target)]
 
 
-def test_permanent_delete_is_hard_disabled(manager, tmp_path):
-    target = tmp_path / "file.txt"
+def test_permanent_delete_is_hard_disabled(manager, cleanup_tmp_path):
+    target = cleanup_tmp_path / "file.txt"
     target.write_text("x")
 
     with pytest.raises(PermissionError):
@@ -242,14 +242,14 @@ def test_permanent_delete_is_hard_disabled(manager, tmp_path):
     assert target.exists()
 
 
-def test_preflight_is_advisory_and_reports_rejections(tmp_path, manager):
-    target = tmp_path / "file.txt"
+def test_preflight_is_advisory_and_reports_rejections(cleanup_tmp_path, manager):
+    target = cleanup_tmp_path / "file.txt"
     target.write_text("x")
-    directory = tmp_path / "dir"
+    directory = cleanup_tmp_path / "dir"
     directory.mkdir()
 
     result = manager.preflight_cleanup(
-        [str(target), str(directory)], [str(tmp_path)]
+        [str(target), str(directory)], [str(cleanup_tmp_path)]
     )
 
     assert [item["allowed"] for item in result["decisions"]] == [
@@ -261,10 +261,10 @@ def test_preflight_is_advisory_and_reports_rejections(tmp_path, manager):
 
 
 def test_parent_symlink_rejection_prevents_send2trash(
-    tmp_path, manager, monkeypatch
+    cleanup_tmp_path, manager, monkeypatch
 ):
-    approved = tmp_path / "approved"
-    outside = tmp_path / "outside"
+    approved = cleanup_tmp_path / "approved"
+    outside = cleanup_tmp_path / "outside"
     approved.mkdir()
     outside.mkdir()
     (outside / "secret.txt").write_text("outside")
@@ -296,14 +296,14 @@ def _reviewed_identities(manager, paths, root):
     return preview, preview["identities"]
 
 
-def test_preflight_exposes_identities_for_allowed_paths(tmp_path, manager):
-    target = tmp_path / "file.txt"
+def test_preflight_exposes_identities_for_allowed_paths(cleanup_tmp_path, manager):
+    target = cleanup_tmp_path / "file.txt"
     target.write_text("x")
-    directory = tmp_path / "dir"
+    directory = cleanup_tmp_path / "dir"
     directory.mkdir()
 
     preview = manager.preflight_cleanup(
-        [str(target), str(directory)], [str(tmp_path)]
+        [str(target), str(directory)], [str(cleanup_tmp_path)]
     )
 
     assert preview["allowed"] == [str(target)]
@@ -319,19 +319,19 @@ def test_preflight_exposes_identities_for_allowed_paths(tmp_path, manager):
 
 
 def test_unchanged_file_with_reviewed_identity_is_moved(
-    tmp_path, manager, monkeypatch
+    cleanup_tmp_path, manager, monkeypatch
 ):
-    target = tmp_path / "file.txt"
+    target = cleanup_tmp_path / "file.txt"
     target.write_text("x")
     preview, identities = _reviewed_identities(
-        manager, [str(target)], tmp_path
+        manager, [str(target)], cleanup_tmp_path
     )
     moved = []
     _fake_trash(monkeypatch, moved)
 
     result = manager.move_to_recycle_bin(
         [str(target)],
-        allowed_roots=[str(tmp_path)],
+        allowed_roots=[str(cleanup_tmp_path)],
         expected_identities=preview["identities"],
     )
 
@@ -341,14 +341,14 @@ def test_unchanged_file_with_reviewed_identity_is_moved(
 
 
 def test_replaced_regular_file_is_rejected_after_review(
-    tmp_path, manager, monkeypatch
+    cleanup_tmp_path, manager, monkeypatch
 ):
-    target = tmp_path / "reviewed.txt"
+    target = cleanup_tmp_path / "reviewed.txt"
     target.write_text("original")
-    replacement = tmp_path / "replacement.txt"
+    replacement = cleanup_tmp_path / "replacement.txt"
     replacement.write_text("replacement content with a different size")
     preview, identities = _reviewed_identities(
-        manager, [str(target)], tmp_path
+        manager, [str(target)], cleanup_tmp_path
     )
     moved = []
     _fake_trash(monkeypatch, moved)
@@ -358,7 +358,7 @@ def test_replaced_regular_file_is_rejected_after_review(
     assert target.exists()
     result = manager.move_to_recycle_bin(
         [str(target)],
-        allowed_roots=[str(tmp_path)],
+        allowed_roots=[str(cleanup_tmp_path)],
         expected_identities=preview["identities"],
     )
 
@@ -369,12 +369,12 @@ def test_replaced_regular_file_is_rejected_after_review(
 
 
 def test_modified_file_is_rejected_after_review(
-    tmp_path, manager, monkeypatch
+    cleanup_tmp_path, manager, monkeypatch
 ):
-    target = tmp_path / "file.txt"
+    target = cleanup_tmp_path / "file.txt"
     target.write_text("x")
     preview, identities = _reviewed_identities(
-        manager, [str(target)], tmp_path
+        manager, [str(target)], cleanup_tmp_path
     )
     moved = []
     _fake_trash(monkeypatch, moved)
@@ -384,7 +384,7 @@ def test_modified_file_is_rejected_after_review(
 
     result = manager.move_to_recycle_bin(
         [str(target)],
-        allowed_roots=[str(tmp_path)],
+        allowed_roots=[str(cleanup_tmp_path)],
         expected_identities=preview["identities"],
     )
 
@@ -395,12 +395,12 @@ def test_modified_file_is_rejected_after_review(
 
 
 def test_missing_file_after_review_is_rejected(
-    tmp_path, manager, monkeypatch
+    cleanup_tmp_path, manager, monkeypatch
 ):
-    target = tmp_path / "file.txt"
+    target = cleanup_tmp_path / "file.txt"
     target.write_text("x")
     preview, identities = _reviewed_identities(
-        manager, [str(target)], tmp_path
+        manager, [str(target)], cleanup_tmp_path
     )
     moved = []
     _fake_trash(monkeypatch, moved)
@@ -409,7 +409,7 @@ def test_missing_file_after_review_is_rejected(
 
     result = manager.move_to_recycle_bin(
         [str(target)],
-        allowed_roots=[str(tmp_path)],
+        allowed_roots=[str(cleanup_tmp_path)],
         expected_identities=preview["identities"],
     )
 
@@ -420,14 +420,14 @@ def test_missing_file_after_review_is_rejected(
 
 
 def test_symlink_replacement_after_review_is_rejected(
-    tmp_path, manager, monkeypatch
+    cleanup_tmp_path, manager, monkeypatch
 ):
-    target = tmp_path / "file.txt"
+    target = cleanup_tmp_path / "file.txt"
     target.write_text("x")
-    other = tmp_path / "other.txt"
+    other = cleanup_tmp_path / "other.txt"
     other.write_text("other")
     preview, identities = _reviewed_identities(
-        manager, [str(target)], tmp_path
+        manager, [str(target)], cleanup_tmp_path
     )
     moved = []
     _fake_trash(monkeypatch, moved)
@@ -440,7 +440,7 @@ def test_symlink_replacement_after_review_is_rejected(
 
     result = manager.move_to_recycle_bin(
         [str(target)],
-        allowed_roots=[str(tmp_path)],
+        allowed_roots=[str(cleanup_tmp_path)],
         expected_identities=preview["identities"],
     )
 
@@ -451,17 +451,17 @@ def test_symlink_replacement_after_review_is_rejected(
 
 
 def test_identity_unavailable_is_rejected_before_trash(
-    tmp_path, manager, monkeypatch
+    cleanup_tmp_path, manager, monkeypatch
 ):
-    target = tmp_path / "file.txt"
+    target = cleanup_tmp_path / "file.txt"
     target.write_text("x")
     monkeypatch.setattr(policy_module, "capture_identity", lambda stat: None)
     moved = []
     _fake_trash(monkeypatch, moved)
 
-    preview = manager.preflight_cleanup([str(target)], [str(tmp_path)])
+    preview = manager.preflight_cleanup([str(target)], [str(cleanup_tmp_path)])
     result = manager.move_to_recycle_bin(
-        [str(target)], allowed_roots=[str(tmp_path)]
+        [str(target)], allowed_roots=[str(cleanup_tmp_path)]
     )
 
     assert preview["allowed"] == []
@@ -473,16 +473,16 @@ def test_identity_unavailable_is_rejected_before_trash(
 
 
 def test_path_missing_from_reviewed_identity_map_is_rejected(
-    tmp_path, manager, monkeypatch
+    cleanup_tmp_path, manager, monkeypatch
 ):
-    target = tmp_path / "file.txt"
+    target = cleanup_tmp_path / "file.txt"
     target.write_text("x")
     moved = []
     _fake_trash(monkeypatch, moved)
 
     result = manager.move_to_recycle_bin(
         [str(target)],
-        allowed_roots=[str(tmp_path)],
+        allowed_roots=[str(cleanup_tmp_path)],
         expected_identities={},
     )
 
@@ -493,16 +493,16 @@ def test_path_missing_from_reviewed_identity_map_is_rejected(
 
 
 def test_replaced_file_does_not_block_other_eligible_files(
-    tmp_path, manager, monkeypatch
+    cleanup_tmp_path, manager, monkeypatch
 ):
-    first = tmp_path / "a.txt"
+    first = cleanup_tmp_path / "a.txt"
     first.write_text("original")
-    second = tmp_path / "b.txt"
+    second = cleanup_tmp_path / "b.txt"
     second.write_text("keep")
-    replacement = tmp_path / "replacement.txt"
+    replacement = cleanup_tmp_path / "replacement.txt"
     replacement.write_text("different replacement content")
     preview, identities = _reviewed_identities(
-        manager, [str(first), str(second)], tmp_path
+        manager, [str(first), str(second)], cleanup_tmp_path
     )
     moved = []
     _fake_trash(monkeypatch, moved)
@@ -511,7 +511,7 @@ def test_replaced_file_does_not_block_other_eligible_files(
 
     result = manager.move_to_recycle_bin(
         [str(first), str(second)],
-        allowed_roots=[str(tmp_path)],
+        allowed_roots=[str(cleanup_tmp_path)],
         expected_identities=preview["identities"],
     )
 
@@ -527,11 +527,11 @@ def test_replaced_file_does_not_block_other_eligible_files(
 
 
 def test_non_mapping_expected_identities_rejected_per_file(
-    tmp_path, monkeypatch
+    cleanup_tmp_path, monkeypatch
 ):
-    first = tmp_path / "a.txt"
+    first = cleanup_tmp_path / "a.txt"
     first.write_text("a")
-    second = tmp_path / "b.txt"
+    second = cleanup_tmp_path / "b.txt"
     second.write_text("b")
     moved = []
     _fake_trash(monkeypatch, moved)
@@ -544,7 +544,7 @@ def test_non_mapping_expected_identities_rejected_per_file(
 
     result = manager.move_to_recycle_bin(
         [str(first), str(second)],
-        allowed_roots=[str(tmp_path)],
+        allowed_roots=[str(cleanup_tmp_path)],
         expected_identities=[("not", "a", "mapping")],
     )
 
@@ -569,17 +569,17 @@ def test_non_mapping_expected_identities_rejected_per_file(
 
 
 def test_malformed_expected_identity_value_is_rejected(
-    tmp_path, manager, monkeypatch
+    cleanup_tmp_path, manager, monkeypatch
 ):
-    target = tmp_path / "file.txt"
+    target = cleanup_tmp_path / "file.txt"
     target.write_text("x")
-    preview = manager.preflight_cleanup([str(target)], [str(tmp_path)])
+    preview = manager.preflight_cleanup([str(target)], [str(cleanup_tmp_path)])
     moved = []
     _fake_trash(monkeypatch, moved)
 
     result = manager.move_to_recycle_bin(
         [str(target)],
-        allowed_roots=[str(tmp_path)],
+        allowed_roots=[str(cleanup_tmp_path)],
         expected_identities={str(target): ("bad",)},
     )
 
@@ -591,11 +591,11 @@ def test_malformed_expected_identity_value_is_rejected(
 
 
 def test_fresh_identity_unavailable_after_successful_preflight_is_rejected(
-    tmp_path, manager, monkeypatch
+    cleanup_tmp_path, manager, monkeypatch
 ):
-    target = tmp_path / "file.txt"
+    target = cleanup_tmp_path / "file.txt"
     target.write_text("x")
-    preview = manager.preflight_cleanup([str(target)], [str(tmp_path)])
+    preview = manager.preflight_cleanup([str(target)], [str(cleanup_tmp_path)])
     assert preview["allowed"] == [str(target)]
     moved = []
     _fake_trash(monkeypatch, moved)
@@ -607,7 +607,7 @@ def test_fresh_identity_unavailable_after_successful_preflight_is_rejected(
 
     result = manager.move_to_recycle_bin(
         [str(target)],
-        allowed_roots=[str(tmp_path)],
+        allowed_roots=[str(cleanup_tmp_path)],
         expected_identities=preview["identities"],
     )
 

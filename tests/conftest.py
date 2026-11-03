@@ -1,7 +1,13 @@
 # pytest configuration
 
+import os
+import shutil
+import tempfile
+from pathlib import Path
+
 import pytest
 from panther.config import config
+from panther.services.cleanup_policy import is_protected_path
 
 
 @pytest.fixture(autouse=True)
@@ -28,6 +34,37 @@ def isolated_history_db(tmp_path_factory, monkeypatch):
 
     history._ensure_schema()
     yield {"db": test_db, "normal_path": normal_path}
+
+
+@pytest.fixture
+def cleanup_tmp_path(tmp_path):
+    """Provide a disposable root that cleanup policy does not protect.
+
+    On Windows, pytest's default temporary directory is under the user's
+    AppData tree, which cleanup policy intentionally protects. Cleanup tests
+    need a disposable root outside those protected locations.
+    """
+    if os.name != "nt":
+        yield tmp_path
+        return
+
+    base = Path(
+        os.environ.get("RUNNER_TEMP")
+        or (Path.home() / "PantherCleanupTests")
+    )
+    base.mkdir(parents=True, exist_ok=True)
+    path = Path(
+        tempfile.mkdtemp(prefix="panther-cleanup-", dir=str(base))
+    )
+    if is_protected_path(str(path), windows=True):
+        shutil.rmtree(path, ignore_errors=True)
+        pytest.fail(
+            "cleanup_tmp_path resolved inside a protected location"
+        )
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 @pytest.fixture(scope="session")

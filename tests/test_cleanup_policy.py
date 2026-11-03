@@ -108,23 +108,23 @@ def test_allowed_root_is_required_and_unknown_is_denied():
     ) == "Outside approved scan roots"
 
 
-def test_preflight_accepts_regular_file_under_approved_root(tmp_path):
-    target = tmp_path / "file.txt"
+def test_preflight_accepts_regular_file_under_approved_root(cleanup_tmp_path):
+    target = cleanup_tmp_path / "file.txt"
     target.write_text("x")
 
-    decision = inspect_path(str(target), [str(tmp_path)])
+    decision = inspect_path(str(target), [str(cleanup_tmp_path)])
 
     assert decision.allowed is True
     assert decision.reason == ""
 
 
-def test_preflight_rejects_directory_and_missing_path(tmp_path):
-    directory = tmp_path / "folder"
+def test_preflight_rejects_directory_and_missing_path(cleanup_tmp_path):
+    directory = cleanup_tmp_path / "folder"
     directory.mkdir()
-    missing = tmp_path / "missing.txt"
+    missing = cleanup_tmp_path / "missing.txt"
 
-    directory_decision = inspect_path(str(directory), [str(tmp_path)])
-    missing_decision = inspect_path(str(missing), [str(tmp_path)])
+    directory_decision = inspect_path(str(directory), [str(cleanup_tmp_path)])
+    missing_decision = inspect_path(str(missing), [str(cleanup_tmp_path)])
 
     assert directory_decision.allowed is False
     assert directory_decision.reason == "Only regular files can be cleaned"
@@ -132,23 +132,23 @@ def test_preflight_rejects_directory_and_missing_path(tmp_path):
     assert missing_decision.reason == "Path does not exist"
 
 
-def test_preflight_rejects_symlink(tmp_path):
-    target = tmp_path / "target.txt"
+def test_preflight_rejects_symlink(cleanup_tmp_path):
+    target = cleanup_tmp_path / "target.txt"
     target.write_text("x")
-    link = tmp_path / "link.txt"
+    link = cleanup_tmp_path / "link.txt"
     try:
         link.symlink_to(target)
     except (OSError, NotImplementedError) as exc:
         pytest.skip(f"symlinks not available: {exc}")
 
-    decision = inspect_path(str(link), [str(tmp_path)])
+    decision = inspect_path(str(link), [str(cleanup_tmp_path)])
 
     assert decision.allowed is False
     assert "symbolic link" in decision.reason.lower()
 
 
-def test_preflight_rejects_reparse_point(monkeypatch, tmp_path):
-    target = tmp_path / "reparse.txt"
+def test_preflight_rejects_reparse_point(monkeypatch, cleanup_tmp_path):
+    target = cleanup_tmp_path / "reparse.txt"
     target.write_text("x")
 
     class FakeStat:
@@ -167,22 +167,22 @@ def test_preflight_rejects_reparse_point(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cleanup_policy.os, "lstat", fake_lstat)
 
-    decision = inspect_path(str(target), [str(tmp_path)])
+    decision = inspect_path(str(target), [str(cleanup_tmp_path)])
 
     assert decision.allowed is False
     assert "reparse" in decision.reason.lower()
 
 
-def test_inspect_paths_preserves_order_and_reasons(tmp_path):
-    first = tmp_path / "a.txt"
+def test_inspect_paths_preserves_order_and_reasons(cleanup_tmp_path):
+    first = cleanup_tmp_path / "a.txt"
     first.write_text("x")
-    second = tmp_path / "b.txt"
+    second = cleanup_tmp_path / "b.txt"
     second.write_text("y")
-    directory = tmp_path / "dir"
+    directory = cleanup_tmp_path / "dir"
     directory.mkdir()
 
     decisions = inspect_paths(
-        [str(first), str(directory), str(second)], [str(tmp_path)]
+        [str(first), str(directory), str(second)], [str(cleanup_tmp_path)]
     )
 
     assert [item.allowed for item in decisions] == [True, False, True]
@@ -196,9 +196,9 @@ def _symlink_directory(link, target):
         pytest.skip(f"symlinks not available: {exc}")
 
 
-def test_parent_symlink_escaping_approved_root_is_rejected(tmp_path):
-    approved = tmp_path / "approved"
-    outside = tmp_path / "outside"
+def test_parent_symlink_escaping_approved_root_is_rejected(cleanup_tmp_path):
+    approved = cleanup_tmp_path / "approved"
+    outside = cleanup_tmp_path / "outside"
     approved.mkdir()
     outside.mkdir()
     secret = outside / "secret.txt"
@@ -218,12 +218,12 @@ def test_parent_symlink_escaping_approved_root_is_rejected(tmp_path):
 
 
 def test_parent_symlink_into_protected_location_is_rejected(
-    tmp_path, monkeypatch
+    cleanup_tmp_path, monkeypatch
 ):
     from panther.services import cleanup_policy
 
-    approved = tmp_path / "approved"
-    protected = tmp_path / "protected"
+    approved = cleanup_tmp_path / "approved"
+    protected = cleanup_tmp_path / "protected"
     approved.mkdir()
     protected.mkdir()
     (protected / "secret.txt").write_text("protected")
@@ -242,8 +242,8 @@ def test_parent_symlink_into_protected_location_is_rejected(
     assert "protected" in decision.reason.lower()
 
 
-def test_normal_nested_file_remains_eligible(tmp_path):
-    approved = tmp_path / "approved"
+def test_normal_nested_file_remains_eligible(cleanup_tmp_path):
+    approved = cleanup_tmp_path / "approved"
     nested = approved / "nested" / "deeper"
     nested.mkdir(parents=True)
     target = nested / "file.txt"
@@ -256,11 +256,11 @@ def test_normal_nested_file_remains_eligible(tmp_path):
 
 
 def test_parent_reparse_point_simulation_is_rejected(
-    tmp_path, monkeypatch
+    cleanup_tmp_path, monkeypatch
 ):
     from panther.services import cleanup_policy
 
-    approved = tmp_path / "approved"
+    approved = cleanup_tmp_path / "approved"
     parent = approved / "parent"
     parent.mkdir(parents=True)
     target = parent / "file.txt"
@@ -291,8 +291,8 @@ def test_parent_reparse_point_simulation_is_rejected(
     )
 
 
-def test_capture_identity_uses_dev_inode_size_and_mtime_ns(tmp_path):
-    target = tmp_path / "file.txt"
+def test_capture_identity_uses_dev_inode_size_and_mtime_ns(cleanup_tmp_path):
+    target = cleanup_tmp_path / "file.txt"
     target.write_text("x")
     stat_result = os.lstat(target)
 
@@ -335,11 +335,11 @@ def test_capture_identity_accepts_negative_mtime_ns():
     assert capture_identity(FakeStat()) == (1, 2, 3, -1)
 
 
-def test_preflight_regular_file_exposes_identity(tmp_path):
-    target = tmp_path / "file.txt"
+def test_preflight_regular_file_exposes_identity(cleanup_tmp_path):
+    target = cleanup_tmp_path / "file.txt"
     target.write_text("x")
 
-    decision = inspect_path(str(target), [str(tmp_path)])
+    decision = inspect_path(str(target), [str(cleanup_tmp_path)])
 
     assert decision.allowed is True
     assert decision.identity is not None
