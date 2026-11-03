@@ -146,10 +146,6 @@ class DashboardScreen(QWidget):
         """)
         
         card_layout.addWidget(title_label)
-        card.value_label = value_label
-        card.detail_label = detail_label
-        card.progress = progress
-        return card
         card_layout.addSpacing(6)
         card_layout.addWidget(value_label)
         card_layout.addWidget(detail_label)
