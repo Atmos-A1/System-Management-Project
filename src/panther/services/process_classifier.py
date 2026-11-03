@@ -5,6 +5,7 @@ service association, parent-child relationships, known metadata.
 Implements the classification rules from PRD Section 5.2.
 """
 
+import getpass
 import os
 from typing import Dict, Any, List
 
@@ -22,7 +23,6 @@ SYSTEM_PATHS = [
     os.environ.get('WINDIR', r'C:\Windows').lower(),
     r'c:\windows\system32',
     r'c:\windows\syswow64',
-    r'c:\program files\windowsapps',
 ]
 
 # Known Windows services patterns
@@ -92,31 +92,30 @@ class ProcessClassifier:
                 confidence = min(confidence, 0.8)
                 return self._build_result(category, risk_level, importance, confidence, evidence, explanation, can_terminate, requires_confirmation)
         
-        # Check if it's from Program Files (user applications)
-        if exe and ('program files' in exe and 'windowsapps' not in exe):
-            evidence.append(f"Application installed in Program Files: {process.get('exe')}")
-            confidence += 0.3
+        # A user-application candidate must run as the interactive user and
+        # have an executable in a plausible application install location.
+        # This supports display filtering only; it is NOT proof that the
+        # process is safe to close or that it has no background responsibilities.
+        process_user = (process.get('username') or '').replace('/', '\\').rsplit('\\', 1)[-1].casefold()
+        current_user = getpass.getuser().casefold()
+        owned_by_current_user = bool(process_user and process_user == current_user)
+        in_program_files = 'program files' in exe and 'windowsapps' not in exe
+        in_appdata = 'appdata' in exe and 'local\\temp' not in exe and 'roaming\\temp' not in exe
+
+        if owned_by_current_user and exe and name not in SYSTEM_SERVICE_PROCESSES and (in_program_files or in_appdata):
+            evidence.append("Process runs under the current user account")
+            evidence.append("Executable is located in a recognised application directory")
+            confidence = 0.65 if in_program_files else 0.55
             category = "User application"
-            risk_level = "Medium"
+            risk_level = "Review required"
             importance = "Optional"
-            explanation = "This appears to be a user-installed application. You can usually close it safely if not in use."
-            can_terminate = True
+            explanation = (
+                "This is a user-application candidate based on its account and location. "
+                "This does not prove it is safe to close; it may perform background work "
+                "or contain unsaved data."
+            )
+            can_terminate = False
             requires_confirmation = True
-            confidence = min(confidence, 0.85)
-            return self._build_result(category, risk_level, importance, confidence, evidence, explanation, can_terminate, requires_confirmation)
-        
-        # Check common user app locations
-        if exe and ('appdata' in exe or 'local\\temp' not in exe and name.endswith('.exe')):
-            # Could be user app
-            evidence.append("Executable from user application directory")
-            confidence += 0.2
-            category = "User application"
-            risk_level = "Low to Medium"
-            importance = "Optional"
-            explanation = "Likely a user application. Closing may result in loss of unsaved data."
-            can_terminate = True
-            requires_confirmation = True
-            confidence = min(confidence, 0.7)
             return self._build_result(category, risk_level, importance, confidence, evidence, explanation, can_terminate, requires_confirmation)
         
         # Default - unknown, be conservative

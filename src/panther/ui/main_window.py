@@ -18,6 +18,7 @@ from PySide6.QtCore import Qt
 from .navigation import NAV_ITEMS
 from .dashboard import DashboardScreen
 from .processes import ProcessesScreen
+from .adaptive_control import AdaptiveControlScreen
 from .startup import StartupScreen
 from .battery import BatteryScreen
 from .recommendations import RecommendationsScreen
@@ -80,6 +81,7 @@ class MainWindow(QMainWindow):
         _screen_map = {
             "Dashboard": DashboardScreen,
             "Processes": ProcessesScreen,
+            "Adaptive Control": AdaptiveControlScreen,
             "Storage": StorageScreen,
             "Battery": BatteryScreen,
             "Startup Apps": StartupScreen,
@@ -108,6 +110,15 @@ class MainWindow(QMainWindow):
         # Expose stack for external navigation
         self.stack_widget = self.stack
     
+    def closeEvent(self, event):
+        # Stop background workers before Qt destroys child widgets.
+        for widget in tuple(self._screen_widgets.values()):
+            try:
+                widget.close()
+            except Exception:
+                pass
+        super().closeEvent(event)
+
     def _on_tab_changed(self, index):
         # Lazy load screen if not loaded
         if index in self._screen_widgets:
