@@ -4,7 +4,7 @@ name = "panther"
 version = "0.1.0"
 description = "Panther System Intelligence – Windows monitoring and safe optimisation"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 dependencies = [
     "PySide6>=6.5.0",
