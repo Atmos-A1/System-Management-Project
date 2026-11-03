@@ -177,6 +177,7 @@ def test_cleanup_passes_only_eligible_paths_and_review_cancel_blocks_action(
             }
         ],
         "decisions": [],
+        "identities": {"/approved/root/a.txt": (1, 2, 3, 4)},
     }
     monkeypatch.setattr(
         storage_module.cleanup_manager,
@@ -185,7 +186,7 @@ def test_cleanup_passes_only_eligible_paths_and_review_cancel_blocks_action(
     )
     captured = {}
 
-    def fake_move(paths, allowed_roots=None):
+    def fake_move(paths, allowed_roots=None, expected_identities=None):
         captured["paths"] = paths
         captured["roots"] = allowed_roots
         return {
@@ -236,6 +237,228 @@ def test_cleanup_passes_only_eligible_paths_and_review_cancel_blocks_action(
     widget.largest_table.selectRow(1)
     widget.delete_selected_largest()
     assert captured == {}
+
+
+def test_cleanup_passes_reviewed_identities_to_move(qtbot, monkeypatch):
+    _app()
+    widget = StorageScreen()
+    qtbot.addWidget(widget)
+    widget._scan_roots["largest"] = "/approved/root"
+    widget._populate_largest(
+        [{"path": "/approved/root/a.txt", "size": 10}]
+    )
+    widget.largest_table.selectRow(0)
+
+    reviewed = {"/approved/root/a.txt": (1, 2, 3, 4)}
+    preview = {
+        "allowed": ["/approved/root/a.txt"],
+        "rejected": [],
+        "decisions": [
+            {
+                "path": "/approved/root/a.txt",
+                "allowed": True,
+                "reason": "",
+                "identity": (1, 2, 3, 4),
+            }
+        ],
+        "identities": reviewed,
+    }
+    monkeypatch.setattr(
+        storage_module.cleanup_manager,
+        "preflight_cleanup",
+        lambda paths, roots: preview,
+    )
+    captured = {}
+
+    def fake_move(paths, allowed_roots=None, expected_identities=None):
+        captured["expected_identities"] = expected_identities
+        return {"moved": 0, "failed": 0, "outcomes": []}
+
+    monkeypatch.setattr(
+        storage_module.cleanup_manager, "move_to_recycle_bin", fake_move
+    )
+
+    class FakeReviewDialog:
+        def __init__(self, preview_arg, sizes, parent=None):
+            self.eligible_paths = preview_arg["allowed"]
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    class FakeResultDialog:
+        def __init__(self, result, parent=None):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(
+        storage_module, "CleanupReviewDialog", FakeReviewDialog
+    )
+    monkeypatch.setattr(
+        storage_module, "CleanupResultDialog", FakeResultDialog
+    )
+
+    widget.delete_selected_largest()
+
+    assert captured["expected_identities"] == reviewed
+
+
+def test_cleanup_blocks_largest_when_preview_identities_missing(
+    qtbot, monkeypatch
+):
+    _app()
+    widget = StorageScreen()
+    qtbot.addWidget(widget)
+    widget._scan_roots["largest"] = "/approved/root"
+    widget._populate_largest(
+        [{"path": "/approved/root/a.txt", "size": 10}]
+    )
+    widget.largest_table.selectRow(0)
+
+    preview = {
+        "allowed": ["/approved/root/a.txt"],
+        "rejected": [],
+        "decisions": [],
+    }
+    monkeypatch.setattr(
+        storage_module.cleanup_manager,
+        "preflight_cleanup",
+        lambda paths, roots: preview,
+    )
+    captured = {}
+
+    def fake_move(paths, allowed_roots=None, expected_identities=None):
+        captured["called"] = True
+        return {"moved": 0, "failed": 0, "outcomes": []}
+
+    monkeypatch.setattr(
+        storage_module.cleanup_manager, "move_to_recycle_bin", fake_move
+    )
+
+    class FakeReviewDialog:
+        def __init__(self, preview_arg, sizes, parent=None):
+            self.eligible_paths = preview_arg["allowed"]
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(
+        storage_module, "CleanupReviewDialog", FakeReviewDialog
+    )
+
+    class FakeResultDialog:
+        def __init__(self, result, parent=None):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(
+        storage_module, "CleanupResultDialog", FakeResultDialog
+    )
+    warnings = []
+    monkeypatch.setattr(
+        storage_module.QMessageBox,
+        "warning",
+        lambda *args, **kwargs: warnings.append(args),
+    )
+
+    widget.delete_selected_largest()
+
+    assert "called" not in captured
+    assert warnings
+    assert "identity" in str(warnings[0]).lower()
+
+
+def test_cleanup_blocks_duplicates_when_preview_identities_invalid(
+    qtbot, monkeypatch
+):
+    _app()
+    widget = StorageScreen()
+    qtbot.addWidget(widget)
+    widget._scan_roots["duplicates"] = "/approved/root"
+    widget._populate_duplicates(
+        [
+            {
+                "size": 100,
+                "count": 2,
+                "potential_savings": 100,
+                "files": [
+                    {
+                        "path": "/approved/root/a.txt",
+                        "directory": "/approved/root",
+                        "size": 100,
+                        "modified": "2024-01-01 00:00:00",
+                    },
+                    {
+                        "path": "/approved/root/b.txt",
+                        "directory": "/approved/root",
+                        "size": 100,
+                        "modified": "2023-01-01 00:00:00",
+                    },
+                ],
+            }
+        ]
+    )
+    selection = widget.dups_panel.current_selection
+    assert selection.set_remove("/approved/root/a.txt", True)
+    widget.dups_panel.refresh_current_selection()
+
+    preview = {
+        "allowed": ["/approved/root/a.txt"],
+        "rejected": [],
+        "decisions": [],
+        "identities": {"/approved/root/a.txt": ("bad",)},
+    }
+    monkeypatch.setattr(
+        storage_module.cleanup_manager,
+        "preflight_cleanup",
+        lambda paths, roots: preview,
+    )
+    captured = {}
+
+    def fake_move(paths, allowed_roots=None, expected_identities=None):
+        captured["called"] = True
+        return {"moved": 0, "failed": 0, "outcomes": []}
+
+    monkeypatch.setattr(
+        storage_module.cleanup_manager, "move_to_recycle_bin", fake_move
+    )
+
+    class FakeReviewDialog:
+        def __init__(self, preview_arg, sizes, parent=None):
+            self.eligible_paths = preview_arg["allowed"]
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(
+        storage_module, "CleanupReviewDialog", FakeReviewDialog
+    )
+
+    class FakeResultDialog:
+        def __init__(self, result, parent=None):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(
+        storage_module, "CleanupResultDialog", FakeResultDialog
+    )
+    warnings = []
+    monkeypatch.setattr(
+        storage_module.QMessageBox,
+        "warning",
+        lambda *args, **kwargs: warnings.append(args),
+    )
+
+    widget.remove_duplicates()
+
+    assert "called" not in captured
+    assert warnings
+    assert "identity" in str(warnings[0]).lower()
 
 
 def test_duplicate_scan_finish_updates_panel_summary(qtbot):
@@ -309,6 +532,7 @@ def test_duplicate_cleanup_uses_only_selected_copies(
         "allowed": ["/approved/root/a.txt"],
         "rejected": [],
         "decisions": [],
+        "identities": {"/approved/root/a.txt": (1, 2, 3, 4)},
     }
     monkeypatch.setattr(
         storage_module.cleanup_manager,
@@ -317,7 +541,7 @@ def test_duplicate_cleanup_uses_only_selected_copies(
     )
     captured = {}
 
-    def fake_move(paths, allowed_roots=None):
+    def fake_move(paths, allowed_roots=None, expected_identities=None):
         captured["paths"] = paths
         captured["roots"] = allowed_roots
         return {
@@ -354,6 +578,86 @@ def test_duplicate_cleanup_uses_only_selected_copies(
 
     assert captured["paths"] == ["/approved/root/a.txt"]
     assert captured["roots"] == ["/approved/root"]
+
+
+def test_duplicate_cleanup_passes_reviewed_identities(qtbot, monkeypatch):
+    _app()
+    widget = StorageScreen()
+    qtbot.addWidget(widget)
+    widget._scan_roots["duplicates"] = "/approved/root"
+    widget._populate_duplicates(
+        [
+            {
+                "size": 100,
+                "count": 2,
+                "potential_savings": 100,
+                "files": [
+                    {
+                        "path": "/approved/root/a.txt",
+                        "directory": "/approved/root",
+                        "size": 100,
+                        "modified": "2024-01-01 00:00:00",
+                    },
+                    {
+                        "path": "/approved/root/b.txt",
+                        "directory": "/approved/root",
+                        "size": 100,
+                        "modified": "2023-01-01 00:00:00",
+                    },
+                ],
+            }
+        ]
+    )
+    selection = widget.dups_panel.current_selection
+    assert selection.set_remove("/approved/root/a.txt", True)
+    widget.dups_panel.refresh_current_selection()
+
+    reviewed = {"/approved/root/a.txt": (11, 22, 33, 44)}
+    preview = {
+        "allowed": ["/approved/root/a.txt"],
+        "rejected": [],
+        "decisions": [],
+        "identities": reviewed,
+    }
+    monkeypatch.setattr(
+        storage_module.cleanup_manager,
+        "preflight_cleanup",
+        lambda paths, roots: preview,
+    )
+    captured = {}
+
+    def fake_move(paths, allowed_roots=None, expected_identities=None):
+        captured["expected_identities"] = expected_identities
+        return {"moved": 0, "failed": 0, "outcomes": []}
+
+    monkeypatch.setattr(
+        storage_module.cleanup_manager, "move_to_recycle_bin", fake_move
+    )
+
+    class FakeReviewDialog:
+        def __init__(self, preview_arg, sizes, parent=None):
+            self.eligible_paths = preview_arg["allowed"]
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    class FakeResultDialog:
+        def __init__(self, result, parent=None):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(
+        storage_module, "CleanupReviewDialog", FakeReviewDialog
+    )
+    monkeypatch.setattr(
+        storage_module, "CleanupResultDialog", FakeResultDialog
+    )
+
+    widget.remove_duplicates()
+
+    assert captured["expected_identities"] == reviewed
 
 
 def _scan_history_record(**overrides):

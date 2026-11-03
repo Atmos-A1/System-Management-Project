@@ -147,6 +147,7 @@ def test_largest_cleanup_uses_selected_source_records(qtbot, monkeypatch):
         "allowed": ["/approved/root/alpha.txt"],
         "rejected": [],
         "decisions": [],
+        "identities": {"/approved/root/alpha.txt": (1, 2, 3, 4)},
     }
 
     def preflight(paths, roots):
@@ -174,7 +175,7 @@ def test_largest_cleanup_uses_selected_source_records(qtbot, monkeypatch):
         def exec(self):
             return QDialog.DialogCode.Accepted
 
-    def fake_move(paths, allowed_roots=None):
+    def fake_move(paths, allowed_roots=None, expected_identities=None):
         captured["moved"] = list(paths)
         return {"moved": 1, "failed": 0, "outcomes": []}
 
@@ -299,6 +300,7 @@ def test_duplicate_cleanup_receives_selected_source_paths(qtbot, monkeypatch):
         "allowed": ["/approved/root/a.txt"],
         "rejected": [],
         "decisions": [],
+        "identities": {"/approved/root/a.txt": (1, 2, 3, 4)},
     }
 
     def preflight(paths, roots):
@@ -326,7 +328,7 @@ def test_duplicate_cleanup_receives_selected_source_paths(qtbot, monkeypatch):
         def exec(self):
             return QDialog.DialogCode.Accepted
 
-    def fake_move(paths, allowed_roots=None):
+    def fake_move(paths, allowed_roots=None, expected_identities=None):
         captured["moved"] = list(paths)
         return {"moved": 1, "failed": 0, "outcomes": []}
 

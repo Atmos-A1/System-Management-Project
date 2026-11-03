@@ -22,11 +22,48 @@ _PROTECTED_FILE_NAMES = {
 }
 
 
+Identity = Tuple[int, int, int, int]
+
+
 @dataclass(frozen=True)
 class CleanupDecision:
     path: str
     allowed: bool
     reason: str = ""
+    identity: Optional[Identity] = None
+
+
+def capture_identity(stat_result) -> Optional[Identity]:
+    """Return ``(st_dev, st_ino, st_size, st_mtime_ns)`` when reliable.
+
+    ``None`` means the file identity cannot be established safely. In
+    particular, an inode of zero or a missing high-resolution mtime is treated
+    as unavailable rather than falling back to weaker metadata. Negative
+    nanosecond modification times are valid for pre-epoch files.
+    """
+    try:
+        device = int(stat_result.st_dev)
+        inode = int(stat_result.st_ino)
+        size = int(stat_result.st_size)
+        mtime_ns = int(stat_result.st_mtime_ns)
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return None
+    if device < 0 or inode <= 0 or size < 0:
+        return None
+    return (device, inode, size, mtime_ns)
+
+
+def is_valid_identity(value: object) -> bool:
+    """Return ``True`` when *value* is a usable cleanup identity tuple."""
+    if not isinstance(value, tuple) or len(value) != 4:
+        return False
+    device, inode, size, mtime_ns = value
+    if not all(
+        isinstance(part, int) and not isinstance(part, bool)
+        for part in (device, inode, size, mtime_ns)
+    ):
+        return False
+    return device >= 0 and inode > 0 and size >= 0
 
 
 def _is_windows(windows: Optional[bool]) -> bool:
@@ -294,7 +331,7 @@ def inspect_path(
     )
     if reason is not None:
         return CleanupDecision(target, False, reason)
-    return CleanupDecision(target, True, "")
+    return CleanupDecision(target, True, "", capture_identity(stat_result))
 
 
 def inspect_paths(

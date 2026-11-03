@@ -7,10 +7,11 @@ approved scan root and outside protected system/application locations.
 
 import json
 import os
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from .cleanup_policy import inspect_path, inspect_paths
+from .cleanup_policy import Identity, inspect_path, inspect_paths, is_valid_identity
 
 try:
     from send2trash import send2trash
@@ -55,18 +56,32 @@ class CleanupManager:
     def preflight_cleanup(
         self, file_paths: List[str], allowed_roots: Optional[List[str]] = None
     ) -> Dict[str, Any]:
-        """Advisory preflight. The move operation revalidates each file."""
+        """Advisory preflight. The move operation revalidates each file.
+
+        Allowed decisions carry the identity captured from the same ``lstat``
+        used for validation. A file whose identity cannot be established is
+        rejected here so the review dialog and execution agree.
+        """
         decisions = inspect_paths(
             [str(path) for path in file_paths], allowed_roots or []
         )
-        decision_dicts = [
-            {
+        decision_dicts: List[Dict[str, Any]] = []
+        identities: Dict[str, Identity] = {}
+        for decision in decisions:
+            allowed = decision.allowed
+            reason = decision.reason
+            if allowed and decision.identity is None:
+                allowed = False
+                reason = "File identity cannot be verified"
+            item: Dict[str, Any] = {
                 "path": decision.path,
-                "allowed": decision.allowed,
-                "reason": decision.reason,
+                "allowed": allowed,
+                "reason": reason,
             }
-            for decision in decisions
-        ]
+            if allowed:
+                item["identity"] = decision.identity
+                identities[decision.path] = decision.identity
+            decision_dicts.append(item)
         return {
             "decisions": decision_dicts,
             "allowed": [
@@ -75,22 +90,46 @@ class CleanupManager:
             "rejected": [
                 item for item in decision_dicts if not item["allowed"]
             ],
+            "identities": identities,
         }
 
     def move_to_recycle_bin(
         self,
         file_paths: List[str],
         allowed_roots: Optional[List[str]] = None,
+        expected_identities: Optional[Mapping[str, Identity]] = None,
     ) -> Dict[str, Any]:
         """Move eligible files to the Recycle Bin.
 
         ``allowed_roots`` is required in practice; omitting it makes every path
         fail closed. The preflight is advisory and each file is inspected again
         immediately before it is passed to send2trash.
+
+        ``expected_identities`` carries the identities captured during the
+        original review preview. When omitted, identities from this execution
+        preflight are used; that fallback does not protect the interval
+        between preview and execution.
         """
         requested = [str(path) for path in file_paths]
         preflight = self.preflight_cleanup(requested, allowed_roots)
         roots = [str(root) for root in (allowed_roots or []) if root]
+        identity_mapping_error = ""
+        reviewed: Optional[Dict[str, Identity]]
+        if expected_identities is None:
+            reviewed = None
+        elif isinstance(expected_identities, Mapping):
+            try:
+                reviewed = dict(expected_identities)
+            except Exception:
+                reviewed = {}
+                identity_mapping_error = (
+                    "Cleanup review identity mapping is invalid"
+                )
+        else:
+            reviewed = {}
+            identity_mapping_error = (
+                "Cleanup review identity mapping is invalid"
+            )
 
         outcomes: List[Dict[str, str]] = []
         moved_paths: List[str] = []
@@ -128,6 +167,33 @@ class CleanupManager:
                         "path": path,
                         "status": "rejected",
                         "reason": fresh.reason,
+                    }
+                )
+                continue
+
+            expected = (
+                reviewed.get(path)
+                if reviewed is not None
+                else decision.get("identity")
+            )
+            if identity_mapping_error:
+                reason = identity_mapping_error
+            elif expected is None:
+                reason = "File identity cannot be verified"
+            elif not is_valid_identity(expected):
+                reason = "Cleanup review identity is invalid"
+            elif not is_valid_identity(fresh.identity):
+                reason = "File identity cannot be verified"
+            elif fresh.identity != expected:
+                reason = "File changed since cleanup review"
+            else:
+                reason = ""
+            if reason:
+                outcomes.append(
+                    {
+                        "path": path,
+                        "status": "rejected",
+                        "reason": reason,
                     }
                 )
                 continue

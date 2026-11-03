@@ -5,6 +5,7 @@ and safe cleanup capabilities.
 """
 
 import os
+from collections.abc import Mapping
 from datetime import datetime
 
 import psutil
@@ -18,6 +19,7 @@ from PySide6.QtCore import QDate, QTimer, Qt
 from ..config import config
 from ..services import storage_history
 from ..services.cleanup_manager import cleanup_manager
+from ..services.cleanup_policy import is_valid_identity
 from .cleanup_review import CleanupResultDialog, CleanupReviewDialog
 from .duplicate_review import DuplicateReviewWidget
 from .explorer import ExplorerWidget
@@ -1200,13 +1202,24 @@ class StorageScreen(QWidget):
         preview = self._preview_cleanup(to_remove, root)
         if preview is None:
             return
+        reviewed_identities = self._reviewed_identities(preview)
+        if reviewed_identities is None:
+            QMessageBox.warning(
+                self,
+                "Cleanup Blocked",
+                "The reviewed file identity mapping is unavailable or "
+                "invalid. Run the scan again before cleaning up files.",
+            )
+            return
         sizes = {item["path"]: item["size"] for item in selected_files}
         dialog = CleanupReviewDialog(preview, sizes, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
         result = cleanup_manager.move_to_recycle_bin(
-            dialog.eligible_paths, allowed_roots=[root]
+            dialog.eligible_paths,
+            allowed_roots=[root],
+            expected_identities=reviewed_identities,
         )
         CleanupResultDialog(result, self).exec()
         if result.get("moved", 0) > 0:
@@ -1235,6 +1248,15 @@ class StorageScreen(QWidget):
         preview = self._preview_cleanup(to_remove, root)
         if preview is None:
             return
+        reviewed_identities = self._reviewed_identities(preview)
+        if reviewed_identities is None:
+            QMessageBox.warning(
+                self,
+                "Cleanup Blocked",
+                "The reviewed file identity mapping is unavailable or "
+                "invalid. Run the scan again before cleaning up files.",
+            )
+            return
         dialog = CleanupReviewDialog(
             preview, self.dups_panel.removal_sizes, self
         )
@@ -1242,11 +1264,40 @@ class StorageScreen(QWidget):
             return
 
         result = cleanup_manager.move_to_recycle_bin(
-            dialog.eligible_paths, allowed_roots=[root]
+            dialog.eligible_paths,
+            allowed_roots=[root],
+            expected_identities=reviewed_identities,
         )
         CleanupResultDialog(result, self).exec()
         if result.get("moved", 0) > 0:
             self.scan_duplicates()
+
+    def _reviewed_identities(self, preview):
+        """Return the preview identity mapping to use after confirmation.
+
+        ``None`` means the review cannot be trusted and cleanup must stop.
+        Identities are never recaptured here; the mapping shown in the review
+        is returned unchanged so execution can compare against it.
+        """
+        allowed = [str(path) for path in (preview.get("allowed") or [])]
+        if not allowed:
+            return {}
+        identities = preview.get("identities")
+        if not isinstance(identities, Mapping):
+            return None
+        try:
+            reviewed = dict(identities)
+        except Exception:
+            return None
+        if any(
+            not is_valid_identity(value) for value in reviewed.values()
+        ):
+            return None
+        if any(
+            not is_valid_identity(reviewed.get(path)) for path in allowed
+        ):
+            return None
+        return reviewed
 
     def _preview_cleanup(self, paths, root):
         if not root:

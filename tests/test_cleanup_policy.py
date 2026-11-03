@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from panther.services.cleanup_policy import (
+    capture_identity,
     inspect_path,
     inspect_paths,
     is_protected_path,
@@ -288,4 +289,59 @@ def test_parent_reparse_point_simulation_is_rejected(
         "reparse" in decision.reason.lower()
         or "symbolic link" in decision.reason.lower()
     )
+
+
+def test_capture_identity_uses_dev_inode_size_and_mtime_ns(tmp_path):
+    target = tmp_path / "file.txt"
+    target.write_text("x")
+    stat_result = os.lstat(target)
+
+    identity = capture_identity(stat_result)
+
+    assert identity == (
+        stat_result.st_dev,
+        stat_result.st_ino,
+        stat_result.st_size,
+        stat_result.st_mtime_ns,
+    )
+
+
+def test_capture_identity_rejects_zero_inode():
+    class FakeStat:
+        st_dev = 1
+        st_ino = 0
+        st_size = 1
+        st_mtime_ns = 1
+
+    assert capture_identity(FakeStat()) is None
+
+
+def test_capture_identity_rejects_missing_mtime_ns():
+    class FakeStat:
+        st_dev = 1
+        st_ino = 2
+        st_size = 1
+
+    assert capture_identity(FakeStat()) is None
+
+
+def test_capture_identity_accepts_negative_mtime_ns():
+    class FakeStat:
+        st_dev = 1
+        st_ino = 2
+        st_size = 3
+        st_mtime_ns = -1
+
+    assert capture_identity(FakeStat()) == (1, 2, 3, -1)
+
+
+def test_preflight_regular_file_exposes_identity(tmp_path):
+    target = tmp_path / "file.txt"
+    target.write_text("x")
+
+    decision = inspect_path(str(target), [str(tmp_path)])
+
+    assert decision.allowed is True
+    assert decision.identity is not None
+    assert len(decision.identity) == 4
 
