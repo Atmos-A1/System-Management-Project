@@ -58,7 +58,15 @@ def fake_winreg(monkeypatch):
     fake.EnumValue = lambda key, i: key.EnumValue(i)
     fake.DeleteValue = lambda key, name: None
     monkeypatch.setitem(sys.modules, 'winreg', fake)
-    return fake
+    # Importing the adapter binds ``winreg`` at import time.  Delete any cached
+    # adapter module so the next import picks up the fake ``winreg`` from
+    # ``sys.modules`` instead of a stale real module (Windows) or ``None``
+    # (non-Windows).
+    monkeypatch.delitem(sys.modules, _ADAPTER_MODULE, raising=False)
+    yield fake
+    # Teardown: remove the cached adapter module so subsequent tests do not
+    # reuse an adapter bound to a stale (or real) ``winreg`` module.
+    sys.modules.pop(_ADAPTER_MODULE, None)
 
 def test_get_startup_entries(fake_winreg):
     from panther.services.startup_adapter import get_startup_entries

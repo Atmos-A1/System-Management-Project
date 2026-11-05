@@ -5,7 +5,7 @@ description = "Panther System Intelligence - Tauri frontend"
 edition = "2021"
 
 [dependencies]
-tauri = { version = "2", features = ["dialog-all", "fs-all", "shell-all", "notification"] }
+tauri = { version = "2" }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-shell = "2"
