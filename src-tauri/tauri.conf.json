@@ -37,26 +37,15 @@
         "execute": false,
         "open": false
       },
-      "notification": true,
-      "sidecar": true
+      "notification": true
     },
     "bundle": {
       "active": true,
-      "sidecar": [
-        {
-          "name": "panther-sidecar",
-          "cmd": "python",
-          "args": ["-m", "panther.sidecar.server"],
-          "env": {
-            "PYTHONPATH": "${APP_RESOURCES_DIR}/../python"
-          },
-          "cwd": "${APP_RESOURCES_DIR}"
-        }
-      ]
+      "externalBin": ["../bin/panther-sidecar"]
     },
     "security": {
       "csp": null,
-      "capabilities": []
+      "capabilities": ["default"]
     }
   }
 }

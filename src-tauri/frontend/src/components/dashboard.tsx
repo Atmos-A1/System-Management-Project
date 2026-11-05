@@ -148,7 +148,7 @@ export function Dashboard() {
               subtitle="Processor usage"
               value={data.cpu !== undefined ? `${data.cpu.toFixed(1)}%` : "—"}
               detail="Current CPU utilisation"
-              theme={isDark ? "dark" : "light"}
+
             />
             <MetricCard
               title="Memory"
@@ -159,7 +159,7 @@ export function Dashboard() {
                   ? `${(data.ram.used / 1024 / 1024 / 1024).toFixed(1)} GB / ${(data.ram.total / 1024 / 1024 / 1024).toFixed(1)} GB`
                   : "—"
               }
-              theme={isDark ? "dark" : "light"}
+
             />
             <MetricCard
               title="Storage"
@@ -170,7 +170,7 @@ export function Dashboard() {
                   ? `${(data.disk.used / 1024 / 1024 / 1024).toFixed(1)} GB / ${(data.disk.total / 1024 / 1024 / 1024).toFixed(1)} GB`
                   : "—"
               }
-              theme={isDark ? "dark" : "light"}
+
             />
             <MetricCard
               title="Battery"
@@ -187,7 +187,7 @@ export function Dashboard() {
                     : "Discharging (on battery)"
                   : "No battery detected"
               }
-              theme={isDark ? "dark" : "light"}
+
             />
           </div>
         )}

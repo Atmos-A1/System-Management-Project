@@ -1,0 +1,118 @@
+name: Tauri Linux CI
+
+on:
+  push:
+    branches:
+      - feature/storage-improvements
+  pull_request:
+    paths:
+      - 'src-tauri/**'
+      - 'src/panther/sidecar/**'
+      - 'tests/test_sidecar_stage0.py'
+      - '.github/workflows/tauri-linux.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tauri-linux-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tauri-linux:
+    name: Tauri 2 + React + Python Sidecar (Ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONPATH: src
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ----------------------------------------------------------------------
+      # System dependencies for Tauri 2 on Linux
+      # See: https://v2.tauri.app/start/prerequisites/#linux
+      # ----------------------------------------------------------------------
+      - name: Install Tauri 2 Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libwebkit2gtk-4.1-dev
+
+      # ----------------------------------------------------------------------
+      # Rust toolchain
+      # ----------------------------------------------------------------------
+      - name: Install stable Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      # ----------------------------------------------------------------------
+      # Node.js + frontend dependencies
+      # ----------------------------------------------------------------------
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: src-tauri/frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: src-tauri/frontend
+
+      # ----------------------------------------------------------------------
+      # Python environment
+      # ----------------------------------------------------------------------
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest pytest-qt
+
+      # ----------------------------------------------------------------------
+      # Frontend: TypeScript check + production build
+      # ----------------------------------------------------------------------
+      - name: Frontend TypeScript check
+        run: npx tsc --noEmit
+        working-directory: src-tauri/frontend
+
+      - name: Frontend production build
+        run: npm run build
+        working-directory: src-tauri/frontend
+
+      # ----------------------------------------------------------------------
+      # Python Stage 0 sidecar tests
+      # ----------------------------------------------------------------------
+      - name: Run Stage 0 sidecar tests
+        run: python -m pytest -q tests/test_sidecar_stage0.py
+
+      # ----------------------------------------------------------------------
+      # Rust: cargo check then cargo build
+      # ----------------------------------------------------------------------
+      - name: Rust cargo check
+        run: cargo check
+        working-directory: src-tauri
+
+      - name: Rust cargo build
+        run: cargo build
+        working-directory: src-tauri

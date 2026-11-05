@@ -5,7 +5,6 @@ interface MetricCardProps {
   subtitle: string;
   value: string;
   detail: string;
-  theme: "light" | "dark";
 }
 
 const ICONS: Record<string, React.ComponentType<React.SVGProps<SVGSVGElement>>> = {
@@ -20,10 +19,8 @@ export function MetricCard({
   subtitle,
   value,
   detail,
-  theme,
 }: MetricCardProps) {
   const Icon = ICONS[title] || Cpu;
-  const isDark = theme === "dark";
 
   return (
     <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 shadow-sm">

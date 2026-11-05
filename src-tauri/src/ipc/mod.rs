@@ -114,6 +114,15 @@ impl IpcState {
             let _ = pending.responder.send(result);
         }
     }
+
+    /// Resolve all pending requests with a NotRunning error.
+    /// Called during application shutdown so no request is left hanging.
+    pub fn resolve_all_not_running(&mut self) {
+        let pending_ids: Vec<String> = self.pending.keys().cloned().collect();
+        for id in pending_ids {
+            self.resolve(&id, Err(SidecarError::NotRunning));
+        }
+    }
 }
 
 pub type AppState = Arc<Mutex<IpcState>>;
