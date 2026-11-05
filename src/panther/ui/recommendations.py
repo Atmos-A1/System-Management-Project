@@ -17,6 +17,7 @@ from ..services.system_monitor import (
     get_disk_usage,
     get_battery_info,
 )
+from .navigation import nav_index
 
 
 class RecommendationCard(QFrame):
@@ -186,42 +187,29 @@ class RecommendationsScreen(QWidget):
     def navigate_to_fix(self, rec):
         category = (rec.get('category') or '').lower()
         issue = (rec.get('issue') or '').lower()
-        # Try to find parent window/main window
+        target = None
+        if 'process' in category or 'cpu' in issue or 'memory' in issue or 'ram' in issue:
+            target = "Processes"
+        elif 'storage' in category or 'disk' in issue:
+            target = "Storage"
+        elif 'power' in category or 'battery' in issue:
+            target = "Battery"
+        elif 'startup' in issue:
+            target = "Startup Apps"
+
+        if target is None:
+            return
+
+        # Resolve by navigation label rather than a hard-coded index.
+        try:
+            index = nav_index(target)
+        except KeyError:
+            return
+
         parent = self.window()
         if hasattr(parent, 'sidebar') and hasattr(parent, 'stack'):
-            # Map by index based on NAV_ITEMS order
-            from .navigation import NAV_ITEMS
-            target = None
-            if 'process' in category or 'cpu' in issue or 'memory' in issue or 'ram' in issue:
-                target = "Processes"
-            elif 'storage' in category or 'disk' in issue:
-                target = "Storage"
-            elif 'power' in category or 'battery' in issue:
-                target = "Battery"
-            elif 'startup' in issue:
-                target = "Startup Apps"
-            # Find index
-            for i, (name, _icon) in enumerate(NAV_ITEMS):
-                if name == target:
-                    parent.sidebar.setCurrentRow(i)
-                    parent.stack.setCurrentIndex(i)
-                    return
-        # Fallback: try common indices
-        if 'process' in category or 'cpu' in issue:
-            try:
-                parent.sidebar.setCurrentRow(1)  # Processes
-            except Exception:
-                pass
-        elif 'storage' in category or 'disk' in issue:
-            try:
-                parent.sidebar.setCurrentRow(2)  # Storage
-            except Exception:
-                pass
-        elif 'power' in category or 'battery' in issue:
-            try:
-                parent.sidebar.setCurrentRow(3)  # Battery
-            except Exception:
-                pass
+            parent.sidebar.setCurrentRow(index)
+            parent.stack.setCurrentIndex(index)
 
     def refresh(self):
         for i in reversed(range(self.content_layout.count())):

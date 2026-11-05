@@ -5,17 +5,21 @@ The central widget is a stacked widget that hosts all screens.
 """
 
 from PySide6.QtWidgets import (
+    QApplication,
     QMainWindow,
     QWidget,
     QHBoxLayout,
     QListWidget,
     QListWidgetItem,
+    QSizePolicy,
     QStackedWidget,
     QLabel,
 )
 from PySide6.QtCore import Qt
 
-from .navigation import NAV_ITEMS
+from ..config import config
+from .navigation import NAV_ITEMS, nav_icon
+from .theme import ThemeManager
 from .dashboard import DashboardScreen
 from .processes import ProcessesScreen
 from .adaptive_control import AdaptiveControlScreen
@@ -33,50 +37,37 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Panther System Intelligence")
         self.resize(1150, 780)
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #f7f9fc;
-            }
-            QListWidget {
-                background-color: #111827;
-                color: #e5e7eb;
-                border: none;
-                font-size: 13px;
-                padding: 8px 0px;
-            }
-            QListWidget::item {
-                padding: 11px 22px;
-                border: none;
-                margin: 2px 8px;
-                border-radius: 8px;
-            }
-            QListWidget::item:selected {
-                background-color: #2563eb;
-                color: #ffffff;
-            }
-            QListWidget::item:hover:!selected {
-                background-color: #1f2937;
-                color: #ffffff;
-            }
-            QStackedWidget {
-                background-color: #f7f9fc;
-            }
-        """)
+        # Keep the shell usable when a user resizes or a display is scaled.
+        self.setMinimumSize(900, 600)
+
+        # Apply the persisted theme at the shell boundary.  Individual
+        # screens still own their component-specific styling for now.
+        application = QApplication.instance()
+        self.resolved_theme = ThemeManager.apply_theme(application, config.theme)
 
         central = QWidget()
+        central.setObjectName("centralWidget")
         self.setCentralWidget(central)
         layout = QHBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
         self.sidebar = QListWidget()
-        self.sidebar.setFixedWidth(230)
-        for name, _icon in NAV_ITEMS:
+        self.sidebar.setObjectName("sidebar")
+        # Responsive shell: the sidebar keeps a comfortable range instead of
+        # a fixed pixel width, and the stack takes all remaining space.
+        self.sidebar.setMinimumWidth(200)
+        self.sidebar.setMaximumWidth(260)
+        self.sidebar.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        for name, icon_key in NAV_ITEMS:
             item = QListWidgetItem(name)
+            item.setIcon(nav_icon(icon_key))
             self.sidebar.addItem(item)
         layout.addWidget(self.sidebar)
 
         self.stack = QStackedWidget()
+        self.stack.setObjectName("mainStack")
+        self.stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         _screen_map = {
             "Dashboard": DashboardScreen,
@@ -103,7 +94,7 @@ class MainWindow(QMainWindow):
                 placeholder.setAlignment(Qt.AlignCenter)
                 self.stack.addWidget(placeholder)
 
-        layout.addWidget(self.stack)
+        layout.addWidget(self.stack, 1)
 
         self.sidebar.currentRowChanged.connect(self._on_tab_changed)
         self.sidebar.setCurrentRow(0)

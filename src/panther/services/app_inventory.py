@@ -2,14 +2,25 @@
 
 Provides functions to list installed applications from Windows registry
 and other sources where available.
+
+The Windows registry module is optional so the application can still launch on
+non-Windows platforms for UI review; there are no registry entries to report
+there, so the inventory is simply empty.
 """
 
 from typing import List, Dict, Any
-import winreg
+
+try:  # ``winreg`` only exists on Windows.
+    import winreg
+except ImportError:  # pragma: no cover - exercised by platform-specific tests
+    winreg = None  # type: ignore[assignment]
 
 
 def get_installed_apps() -> List[Dict[str, Any]]:
     """Return a list of installed applications."""
+    if winreg is None:
+        return []
+
     apps: List[Dict[str, Any]] = []
     # Try to read from HKLM Uninstall keys
     uninstall_keys = [

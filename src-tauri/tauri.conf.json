@@ -1,0 +1,62 @@
+{
+  "$schema": "https://api.tauri.app/schema/tauri-v2_0.json",
+  "productName": "Panther System Intelligence",
+  "version": "0.1.0",
+  "identifier": "com.panther.app",
+  "build": {
+    "frontendDist": "../src-tauri/frontend/dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "cd frontend && npm run dev",
+    "beforeBuildCommand": "cd frontend && npm run build",
+    "devPath": "http://localhost:1420"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Panther System Intelligence",
+        "width": 1150,
+        "height": 780,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "tauri": {
+    "allowlist": {
+      "all": false,
+      "dialog": true,
+      "fs": {
+        "all": true
+      },
+      "shell": {
+        "all": false,
+        "execute": false,
+        "open": false
+      },
+      "notification": true,
+      "sidecar": true
+    },
+    "bundle": {
+      "active": true,
+      "sidecar": [
+        {
+          "name": "panther-sidecar",
+          "cmd": "python",
+          "args": ["-m", "panther.sidecar.server"],
+          "env": {
+            "PYTHONPATH": "${APP_RESOURCES_DIR}/../python"
+          },
+          "cwd": "${APP_RESOURCES_DIR}"
+        }
+      ]
+    },
+    "security": {
+      "csp": null,
+      "capabilities": []
+    }
+  }
+}

@@ -1,9 +1,26 @@
 import builtins
+import importlib
 import sys
 import types
+
 import pytest
 
 # We'll monkeypatch winreg module functions used in the adapter.
+
+_ADAPTER_MODULE = "panther.services.startup_adapter"
+
+
+@pytest.fixture
+def isolated_adapter_module(monkeypatch):
+    """Import a fresh adapter module and discard it after the test.
+
+    Platform availability is decided when the module is imported, so tests
+    that simulate a platform without ``winreg`` need their own module instance.
+    """
+
+    monkeypatch.delitem(sys.modules, _ADAPTER_MODULE, raising=False)
+    yield
+    sys.modules.pop(_ADAPTER_MODULE, None)
 
 def _make_fake_key(values):
     """Return a simple object that mimics a registry key with EnumValue.
@@ -59,3 +76,74 @@ def test_set_entry_disabled(fake_winreg):
     set_entry_enabled("MyApp", "HKCU", False)
     # Disabling a non‑existent entry should be a no‑op, not error.
     set_entry_enabled("NotThere", "HKCU", False)
+
+
+def test_get_startup_entries_reads_both_hives(monkeypatch):
+    fake = types.SimpleNamespace()
+    fake.HKEY_CURRENT_USER = 0x80000001
+    fake.HKEY_LOCAL_MACHINE = 0x80000002
+    fake.KEY_READ = 0x20019
+    fake.KEY_WRITE = 0x20006
+    hkcu_key = _make_fake_key([("UserApp", r"C:\User\app.exe")])
+    hklm_key = _make_fake_key([("MachineApp", r"C:\Machine\app.exe")])
+
+    def OpenKey(root, subkey, reserved=0, access=0):
+        return hkcu_key if root == fake.HKEY_CURRENT_USER else hklm_key
+
+    fake.OpenKey = OpenKey
+    fake.EnumValue = lambda key, i: key.EnumValue(i)
+    fake.DeleteValue = lambda key, name: None
+    monkeypatch.setitem(sys.modules, "winreg", fake)
+    monkeypatch.delitem(sys.modules, _ADAPTER_MODULE, raising=False)
+    try:
+        from panther.services.startup_adapter import get_startup_entries
+
+        entries = get_startup_entries()
+    finally:
+        sys.modules.pop(_ADAPTER_MODULE, None)
+
+    assert [entry["name"] for entry in entries] == ["UserApp", "MachineApp"]
+    assert [entry["scope"] for entry in entries] == ["HKCU", "HKLM"]
+
+
+def test_set_entry_enabled_enable_reports_missing_command(fake_winreg):
+    from panther.services.startup_adapter import set_entry_enabled
+
+    with pytest.raises(NotImplementedError):
+        set_entry_enabled("MyApp", "HKCU", True)
+
+
+def test_set_entry_enabled_rejects_unknown_scope(fake_winreg):
+    from panther.services.startup_adapter import set_entry_enabled
+
+    with pytest.raises(ValueError):
+        set_entry_enabled("MyApp", "NOT_A_SCOPE", False)
+
+
+def test_module_imports_and_reports_unsupported_without_winreg(
+    isolated_adapter_module, monkeypatch
+):
+    # ``None`` in sys.modules makes ``import winreg`` raise ImportError, which
+    # is how a non-Windows platform behaves.
+    monkeypatch.setitem(sys.modules, "winreg", None)
+    module = importlib.import_module(_ADAPTER_MODULE)
+
+    assert module.winreg is None
+    assert module._RUN_KEYS == []
+
+    with pytest.raises(module.UnsupportedPlatformError) as error:
+        module.get_startup_entries()
+
+    message = str(error.value).lower()
+    assert "windows" in message
+    assert "not available" in message
+
+
+def test_set_entry_enabled_reports_unsupported_without_winreg(
+    isolated_adapter_module, monkeypatch
+):
+    monkeypatch.setitem(sys.modules, "winreg", None)
+    module = importlib.import_module(_ADAPTER_MODULE)
+
+    with pytest.raises(module.UnsupportedPlatformError):
+        module.set_entry_enabled("MyApp", "HKCU", False)

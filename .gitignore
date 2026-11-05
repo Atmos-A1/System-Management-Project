@@ -21,3 +21,12 @@ ENV/
 # Scratch / temporary artifacts
 scratch/
 output/
+
+# Node.js dependencies
+node_modules/
+
+# Rust build artifacts
+target/
+
+# Environment files
+.env

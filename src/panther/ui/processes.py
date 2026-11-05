@@ -7,8 +7,8 @@ from PySide6.QtCore import (
     QTimer, Qt, Signal,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QSplitter, QTableView, QVBoxLayout,
+    QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel,
+    QMessageBox, QPushButton, QScrollArea, QSplitter, QTableView, QVBoxLayout,
     QWidget,
 )
 
@@ -17,6 +17,10 @@ from ..services.process_adapter import iter_process_records
 from ..services.process_classifier import ProcessClassifier
 from ..services.windows_process_adapter import (
     ProcessVerificationResult, ProcessVerificationStatus, WindowsProcessAdapter,
+)
+from .components import (
+    Badge, DataTable, FilterBar, KeyValueList, MetricCard, PageScaffold,
+    SectionCard, StatusBanner,
 )
 
 HEADERS = ["Process", "PID", "CPU", "Memory", "Status", "Category"]
@@ -242,80 +246,98 @@ class ProcessesScreen(QWidget):
         self._verification_threads = set()
         self._all_rows = []
         self._snapshot_started = False
+        self._loading = False
         self._pending_identity = None
         self.selected_identity = None
         self._build_ui()
         self.refresh_timer = self.startTimer(12000)
         self.refresh()
 
+    # -- construction -----------------------------------------------------
+
+    def _metric(self, layout, title, detail, accessible_name):
+        card = MetricCard(title, "—", detail, progress_visible=False)
+        card.title_label.setAccessibleName(f"{title} metric")
+        card.value_label.setAccessibleName(accessible_name)
+        layout.addWidget(card)
+        return card
+
     def _build_ui(self):
-        self.setStyleSheet("""
-          QWidget#processesScreen {background:#f5f7fb;color:#172033}
-          QFrame#card {background:white;border:1px solid #e4e9f1;border-radius:9px}
-          QLabel#title {font-size:22px;font-weight:700}
-          QLabel#muted {color:#68758a}
-          QLineEdit,QComboBox {background:white;border:1px solid #d8dfeb;border-radius:7px;padding:8px}
-          QPushButton {background:#2458c6;color:white;border:0;border-radius:7px;padding:8px 14px}
-          QPushButton:disabled {background:#aab5c6}
-          QTableView {background:white;alternate-background-color:#f8faff;border:1px solid #e4e9f1;
-            selection-background-color:#e3edff;selection-color:#172033;outline:0}
-          QHeaderView::section {background:#f2f5fa;border:0;padding:9px;font-weight:600}
-        """)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 18)
-        layout.setSpacing(12)
-        top = QHBoxLayout()
-        titles = QVBoxLayout()
-        title = QLabel("Applications")
-        title.setObjectName("title")
-        subtitle = QLabel("Review running user-application candidates and their resource usage.")
-        subtitle.setObjectName("muted")
-        titles.addWidget(title)
-        titles.addWidget(subtitle)
-        top.addLayout(titles)
-        top.addStretch()
-        self.status_label = QLabel("Preparing process monitor…")
-        self.status_label.setObjectName("muted")
-        top.addWidget(self.status_label)
-        layout.addLayout(top)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self.scaffold = PageScaffold(
+            "Processes",
+            "Review running user-application candidates and their resource usage.",
+            margins=20,
+            spacing=14,
+        )
+        outer.addWidget(self.scaffold)
 
         metrics = QHBoxLayout()
-        self.process_count_value = self._metric(metrics, "Applications")
-        self.cpu_value = self._metric(metrics, "Process CPU total")
-        self.memory_value = self._metric(metrics, "Process memory total")
-        self.cpu_value.setToolTip("Sum of process CPU percentages; may exceed 100% on multicore systems.")
-        self.memory_value.setToolTip("Sum of working sets; shared pages can be counted more than once.")
-        layout.addLayout(metrics)
+        metrics.setSpacing(12)
+        self.process_count_card = self._metric(
+            metrics, "Applications", "User-application candidates",
+            "Number of user-application candidates",
+        )
+        self.cpu_card = self._metric(
+            metrics, "Process CPU total", "Sum across visible applications",
+            "Total process CPU usage",
+        )
+        self.memory_card = self._metric(
+            metrics, "Process memory total", "Working sets may double-count shared pages",
+            "Total process memory usage",
+        )
+        self.process_count_value = self.process_count_card.value_label
+        self.cpu_value = self.cpu_card.value_label
+        self.memory_value = self.memory_card.value_label
+        self.cpu_value.setToolTip(
+            "Sum of process CPU percentages; may exceed 100% on multicore systems."
+        )
+        self.memory_value.setToolTip(
+            "Sum of working sets; shared pages can be counted more than once."
+        )
+        self.scaffold.add_layout(metrics)
 
-        toolbar = QHBoxLayout()
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Search applications…")
-        self.search_input.setClearButtonEnabled(True)
-        self.search_input.setAccessibleName("Search applications")
+        self.filter_bar = FilterBar("Search applications…")
+        self.search_input = self.filter_bar.search_edit
         self.filter_combo = QComboBox()
-        self.filter_combo.addItems(["All user applications",
-                                    "High Memory (>100 MiB)", "High CPU (>10%)"])
+        self.filter_combo.addItems([
+            "All user applications",
+            "High Memory (>100 MiB)",
+            "High CPU (>10%)",
+        ])
         self.filter_combo.setAccessibleName("Filter processes")
         self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.setAccessibleName("Refresh process list")
         self.refresh_btn.clicked.connect(self.refresh)
-        toolbar.addWidget(self.search_input, 3)
-        toolbar.addWidget(self.filter_combo, 1)
-        toolbar.addWidget(self.refresh_btn)
-        layout.addLayout(toolbar)
+        self.filter_bar.add_widget(self.filter_combo, 1)
+        self.filter_bar.add_widget(self.refresh_btn)
+        self.scaffold.add_widget(self.filter_bar)
+
+        self.status_banner = StatusBanner(
+            "Preparing process monitor…", "loading"
+        )
+        self.status_label = self.status_banner.message_label
+        self.scaffold.add_widget(self.status_banner)
+
         self._filter_timer = QTimer(self)
         self._filter_timer.setSingleShot(True)
         self._filter_timer.setInterval(140)
         self._filter_timer.timeout.connect(self._apply_filters)
         self.search_input.textChanged.connect(lambda *_: self._filter_timer.start())
+        self.filter_bar.search_changed.connect(lambda *_: self._filter_timer.start())
         self.filter_combo.currentTextChanged.connect(self._apply_filters)
 
         splitter = QSplitter(Qt.Horizontal)
-        self.table = QTableView()
+        self.table = DataTable()
         self.table.setObjectName("processTable")
         self.model = ProcessTableModel(self)
         self.proxy = ProcessFilterProxyModel(self)
         self.proxy.setSourceModel(self.model)
         self.table.setModel(self.proxy)
+        self.table.configure_columns(stretch=(0,), numeric=(1, 2, 3))
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setSortingEnabled(True)
@@ -326,55 +348,97 @@ class ProcessesScreen(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(34)
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
         for col, width in ((1, 78), (2, 86), (3, 112), (4, 92), (5, 176)):
             header.setSectionResizeMode(col, QHeaderView.Fixed)
             self.table.setColumnWidth(col, width)
         self.table.setAlternatingRowColors(True)
         self.table.setAccessibleName("Running user applications")
         self.table.selectionModel().selectionChanged.connect(self._selection_changed)
+        self.table.error_state.retry_requested.connect(self.refresh)
         splitter.addWidget(self.table)
+        splitter.addWidget(self._build_details())
+        splitter.setStretchFactor(0, 4)
+        splitter.setStretchFactor(1, 2)
+        self.scaffold.add_widget(splitter, 1)
 
-        details = QFrame()
-        details.setObjectName("card")
-        dlayout = QVBoxLayout(details)
-        dlayout.setContentsMargins(14, 14, 14, 14)
+    def _build_details(self):
+        self.details_card = SectionCard(
+            "Application details",
+            "Read-only information. Process actions remain unavailable in this version.",
+        )
         self.details_name = QLabel("Select an application")
+        self.details_name.setObjectName("sectionTitle")
         self.details_name.setWordWrap(True)
-        self.details_text = QLabel("Select an application to inspect resource usage, executable and classification.")
+        self.details_name.setAccessibleName("Selected application")
+        self.details_badge = Badge("No selection", "neutral")
+        self.risk_badge = Badge("Risk unknown", "neutral")
+
+        badges = QHBoxLayout()
+        badges.setSpacing(8)
+        badges.addWidget(self.details_badge)
+        badges.addWidget(self.risk_badge)
+        badges.addStretch()
+
+        self.details = KeyValueList()
+        for key in ("PID", "User", "Status", "CPU", "Memory", "Category",
+                    "Risk", "Executable"):
+            self.details.add_row(key, "—")
+        self.details_text = QLabel("Select an application to inspect resource usage.")
+        self.details_text.setObjectName("pageSubtitle")
         self.details_text.setWordWrap(True)
         self.details_text.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.verification_label = QLabel("Identity verification has not been requested.")
+        self.verification_label = QLabel(
+            "Identity verification has not been requested."
+        )
+        self.verification_label.setObjectName("pageSubtitle")
         self.verification_label.setWordWrap(True)
-        self.action_notice = QLabel("Application closing is not enabled yet. A user-application classification does not prove that closing is consequence-free.")
-        self.action_notice.setWordWrap(True)
-        self.close_btn, self.force_kill_btn = QPushButton("Close application"), QPushButton("Force stop")
+        self.verification_label.setAccessibleName("Process identity verification")
+
+        self.action_notice = StatusBanner(
+            "Application closing is not enabled yet. A user-application "
+            "classification does not prove that closing is consequence-free.",
+            "warning",
+        )
+        self.close_btn, self.force_kill_btn = (
+            QPushButton("Close application"), QPushButton("Force stop")
+        )
         # Force stop is intentionally absent from the Version 1 interface.
         self.force_kill_btn.hide()
         for button in (self.close_btn, self.force_kill_btn):
             button.setEnabled(False)
-            button.setToolTip("Unavailable until the graceful-close safety and verification work is complete.")
+            button.setToolTip(
+                "Unavailable until the graceful-close safety and verification "
+                "work is complete."
+            )
             button.clicked.connect(self._explain_actions_unavailable)
-        for widget in (self.details_name, self.details_text, self.verification_label,
-                       self.action_notice, self.close_btn, self.force_kill_btn):
-            dlayout.addWidget(widget)
-        dlayout.addStretch()
-        splitter.addWidget(details)
-        splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 2)
-        layout.addWidget(splitter, 1)
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        actions.addWidget(self.close_btn)
+        actions.addWidget(self.force_kill_btn)
+        actions.addStretch()
 
-    def _metric(self, layout, label):
-        card = QFrame()
-        card.setObjectName("card")
-        box = QVBoxLayout(card)
-        caption, value = QLabel(label), QLabel("—")
-        caption.setObjectName("muted")
-        value.setStyleSheet("font-size:19px;font-weight:700")
-        box.addWidget(caption)
-        box.addWidget(value)
-        layout.addWidget(card)
-        return value
+        self.details_card.add_widget(self.details_name)
+        self.details_card.add_layout(badges)
+        self.details_body = QWidget()
+        self.details_body.setMinimumSize(0, 0)
+        body_layout = QVBoxLayout(self.details_body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(12)
+        body_layout.addWidget(self.details)
+        body_layout.addWidget(self.details_text)
+        body_layout.addWidget(self.verification_label)
+        body_layout.addWidget(self.action_notice)
+        body_layout.addLayout(actions)
+        body_layout.addStretch()
+        self.details_scroll = QScrollArea()
+        self.details_scroll.setWidgetResizable(True)
+        self.details_scroll.setMinimumSize(0, 0)
+        self.details_scroll.setAccessibleName("Application details")
+        self.details_scroll.setWidget(self.details_body)
+        self.details_card.add_widget(self.details_scroll, 1)
+        return self.details_card
+
+    # -- loading and state ------------------------------------------------
 
     def timerEvent(self, event):
         if event.timerId() == self.refresh_timer:
@@ -386,7 +450,9 @@ class ProcessesScreen(QWidget):
         if self._load_thread is not None and self._load_thread.isRunning():
             return
         self.refresh_btn.setEnabled(False)
-        self.status_label.setText("Loading process information…")
+        self._loading = True
+        self.status_banner.set_state("loading", "Loading process information…")
+        self.table.set_state("loading", "Loading process information…")
         self._pending_identity = self.selected_identity
         self._snapshot_started = False
         thread = ProcessLoadThread(self._process_loader, parent=self)
@@ -412,8 +478,9 @@ class ProcessesScreen(QWidget):
         self._all_rows.extend(batch)
         self.model.append_rows(batch)
         self._apply_filters()
+        self.table.set_state("ready")
         self._update_metrics()
-        self.status_label.setText("Scanning applications…")
+        self.status_banner.set_state("info", "Scanning applications…")
 
     def _on_classification_batch(self, start, rows):
         for offset, row in enumerate(rows):
@@ -422,39 +489,77 @@ class ProcessesScreen(QWidget):
         self.model.update_classifications(start, rows)
         self.proxy.invalidateFilter()
         self._update_metrics()
+        self._update_visible_state()
 
     def _on_loading_complete(self, count):
         if not self._snapshot_started:
             self._snapshot_started = True
             self._all_rows = []
             self.model.set_rows([])
+        self._loading = False
         self._apply_filters()
         self._update_metrics()
-        self.status_label.setText("Updated · {:,} applications".format(sum(1 for _, c in self._all_rows if c.get("category") == "User application")))
+        applications = sum(
+            1 for _, classification in self._all_rows
+            if classification.get("category") == "User application"
+        )
+        self.status_banner.set_state(
+            "success", "Updated · {:,} applications".format(applications)
+        )
+        self._update_visible_state()
         if self._pending_identity is not None:
             self._restore_selection(self._pending_identity)
         self._pending_identity = None
 
     def _on_processes_failed(self, message):
-        if self._snapshot_started:
-            self.status_label.setText("Partial process list · refresh failed")
+        self._loading = False
+        if self._snapshot_started and self._all_rows:
+            self.status_banner.set_state(
+                "warning", "Partial process list · refresh failed: {}".format(message)
+            )
+            self._update_visible_state()
         else:
-            self.status_label.setText("Refresh failed · existing process list retained")
-        if not self._all_rows:
+            self.status_banner.set_state(
+                "error", "Refresh failed · existing process list retained"
+            )
+            self.table.set_state("error", message)
+            self.table.error_state.set_description(str(message))
             self.details_name.setText("Process list unavailable")
             self.details_text.setText(message)
 
     def _apply_filters(self, *_):
         self.proxy.set_criteria(self.search_input.text(), self.filter_combo.currentText())
+        self._update_visible_state()
+
+    def _update_visible_state(self):
+        if self._loading:
+            return
+        if not self._all_rows:
+            self.table.set_state("empty", "No user applications were found")
+        elif self.proxy.rowCount() == 0:
+            self.table.set_state("empty", "No matching applications")
+        else:
+            self.table.set_state("ready")
 
     def _update_metrics(self):
         # Totals describe only the user-application candidates visible in V1.
-        applications = [row for row in self._all_rows if row[1].get("category") == "User application"]
+        applications = [
+            row for row in self._all_rows
+            if row[1].get("category") == "User application"
+        ]
         self.process_count_value.setText("{:,}".format(len(applications)))
-        cpus = [r[0].get("cpu_percent") for r in applications if r[0].get("cpu_percent") is not None]
-        mems = [r[0].get("memory_rss") for r in applications if r[0].get("memory_rss") is not None]
+        cpus = [
+            r[0].get("cpu_percent") for r in applications
+            if r[0].get("cpu_percent") is not None
+        ]
+        mems = [
+            r[0].get("memory_rss") for r in applications
+            if r[0].get("memory_rss") is not None
+        ]
         self.cpu_value.setText("{:.1f}%".format(sum(cpus)) if cpus else "—")
-        self.memory_value.setText("{:.0f} MiB".format(sum(mems) / (1024 * 1024)))
+        self.memory_value.setText("{:.1f} MiB".format(sum(mems) / (1024 * 1024)))
+
+    # -- selection --------------------------------------------------------
 
     def _restore_selection(self, identity):
         for row in range(self.proxy.rowCount()):
@@ -465,8 +570,18 @@ class ProcessesScreen(QWidget):
                 return
         self.selected_identity = None
         self.details_name.setText("Select a process")
-        self.details_text.setText("The previously selected process is no longer present.")
-        self.verification_label.setText("Selection cleared: process identity no longer exists.")
+        self.details_text.setText(
+            "The previously selected process is no longer present."
+        )
+        self.verification_label.setText(
+            "Selection cleared: process identity no longer exists."
+        )
+        self.details_badge.set_text("No selection")
+        self.details_badge.set_status("neutral")
+        self.risk_badge.set_text("Risk unknown")
+        self.risk_badge.set_status("neutral")
+        for key in self.details.keys():
+            self.details.set_value(key, "—")
 
     def _selection_changed(self, *_):
         indexes = self.table.selectionModel().selectedRows()
@@ -483,21 +598,36 @@ class ProcessesScreen(QWidget):
             return
         self.selected_identity = identity
         cpu, memory = process.get("cpu_percent"), process.get("memory_rss")
-        self.details_name.setText("{} · PID {}".format(process.get("name"), identity.pid))
-        self.details_text.setText(
-            "User: {user}\nStatus: {status}\nCPU: {cpu}\nMemory: {memory}\n"
-            "Category: {category}\nRisk: {risk}\nExecutable: {exe}\n\n{explanation}".format(
-                user=process.get("username") or "Unavailable",
-                status=process.get("status") or "Unavailable",
-                cpu="Unavailable" if cpu is None else "{:.1f}%".format(cpu),
-                memory="Unavailable" if memory is None else "{:.1f} MiB".format(memory / (1024 * 1024)),
-                category=classification.get("category", "Unknown"),
-                risk=classification.get("risk_level", "Unknown"),
-                exe=process.get("exe") or "Unavailable",
-                explanation=classification.get("explanation", ""),
-            )
+        category = classification.get("category", "Unknown")
+        risk = classification.get("risk_level", "Unknown")
+        self.details_name.setText(
+            "{} · PID {}".format(process.get("name"), identity.pid)
         )
-        self.verification_label.setText("Verifying this process instance against Windows…")
+        self.details_badge.set_text(category)
+        self.details_badge.set_status(
+            "info" if category == "User application" else "warning"
+        )
+        self.risk_badge.set_text("Risk: {}".format(risk))
+        self.risk_badge.set_status(
+            "critical" if "High" in risk else "warning" if risk != "Unknown" else "neutral"
+        )
+        self.details.set_value("PID", str(identity.pid))
+        self.details.set_value("User", process.get("username") or "Unavailable")
+        self.details.set_value("Status", process.get("status") or "Unavailable")
+        self.details.set_value(
+            "CPU", "Unavailable" if cpu is None else "{:.1f}%".format(cpu)
+        )
+        self.details.set_value(
+            "Memory",
+            "Unavailable" if memory is None else "{:.1f} MiB".format(memory / (1024 * 1024)),
+        )
+        self.details.set_value("Category", category)
+        self.details.set_value("Risk", risk)
+        self.details.set_value("Executable", process.get("exe") or "Unavailable")
+        self.details_text.setText(classification.get("explanation", ""))
+        self.verification_label.setText(
+            "Verifying this process instance against Windows…"
+        )
         thread = ProcessVerificationThread(identity, adapter=self._process_verifier, parent=self)
         thread.completed.connect(self._on_identity_verified)
         thread.finished.connect(lambda: self._verification_finished(thread))
@@ -508,8 +638,11 @@ class ProcessesScreen(QWidget):
         if identity != self.selected_identity:
             return
         status = getattr(getattr(result, "status", None), "value", "verification_failed")
-        self.verification_label.setText("Identity: {}\n{}".format(status.replace("_", " ").title(),
-                                                                     getattr(result, "detail", "")))
+        self.verification_label.setText(
+            "Identity: {}\n{}".format(
+                status.replace("_", " ").title(), getattr(result, "detail", "")
+            )
+        )
 
     def _verification_finished(self, thread):
         self._verification_threads.discard(thread)
