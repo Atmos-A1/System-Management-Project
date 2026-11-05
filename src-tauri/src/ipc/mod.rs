@@ -19,7 +19,7 @@ struct PendingRequest {
 
 /// A JSON-RPC 2.0 request to send to the sidecar.
 #[derive(Debug, Serialize)]
-struct JsonRpcRequest {
+pub struct JsonRpcRequest {
     jsonrpc: String,
     id: String,
     method: String,
@@ -127,7 +127,7 @@ impl IpcState {
 
 pub type AppState = Arc<Mutex<IpcState>>;
 
-mod transport;
+pub mod transport;
 
 #[cfg(test)]
 mod tests {

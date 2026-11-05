@@ -1,8 +1,9 @@
-use crate::ipc::mod_::{AppState, JsonRpcRequest, SidecarError};
+use crate::ipc::{AppState, JsonRpcRequest, SidecarError};
 use serde::Deserialize;
 use serde_json::Value;
 use std::time::Duration;
 use tauri::State;
+use tokio::io::AsyncWriteExt;
 use tokio::process::ChildStdin;
 use tokio::sync::Mutex;
 

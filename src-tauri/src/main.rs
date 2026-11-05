@@ -1,13 +1,11 @@
 use crate::commands::metrics::invoke_metric;
-use crate::ipc::mod_::{AppState, IpcState};
+use crate::ipc::{AppState, IpcState};
 use crate::ipc::transport::spawn_stdout_reader;
-use serde_json::Value;
 use std::process::Stdio;
 use std::sync::Arc;
 use tauri::Manager;
 use tauri_plugin_shell::ShellExt;
-use tokio::io::AsyncWriteExt;
-use tokio::process::{ChildStdin, Command};
+use tokio::process::Command;
 use tokio::sync::Mutex;
 
 mod commands;
@@ -91,7 +89,7 @@ fn main() {
             // 9. Register shutdown handler: kill sidecar process and resolve pending IPC requests.
             let ipc_state_for_shutdown = ipc_state.clone();
             app.on_window_event(move |event| {
-                if matches!(event, tauri::WindowEvent::Destroyed(_)) {
+                if matches!(event, tauri::WindowEvent::Destroyed) {
                     let child_mutex = child_mutex_for_shutdown.clone();
                     let ipc_state = ipc_state_for_shutdown.clone();
                     tokio::spawn(async move {
