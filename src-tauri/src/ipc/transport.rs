@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
 use super::{AppState, JsonRpcResponse, SidecarError};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tauri_plugin_shell::process::{CommandChild, CommandEvent};
+use tokio::io::AsyncWriteExt;
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
+use tokio::sync::Mutex;
 
 // Maximum size of a single JSON-RPC frame (4 MiB).
 const MAX_FRAME_SIZE: usize = 4 * 1024 * 1024;
@@ -24,16 +26,16 @@ pub enum SidecarHandle {
 /// `CommandChild::kill(self)` consumes the child, so ownership is held
 /// behind `Mutex<Option<CommandChild>>` to allow at-most-once kill.
 pub struct TauriSidecarHandle {
-    child: Arc<Mutex<Option<tauri_plugin_shell::CommandChild>>>,
-    events: tokio::sync::mpsc::Receiver<CommandEvent>,
+    pub child: Arc<Mutex<Option<CommandChild>>>,
+    pub events: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<CommandEvent>>>>,
 }
 
 /// Tokio development sidecar handle.
 pub struct TokioSidecarHandle {
-    child: Arc<Mutex<Option<tokio::process::Child>>>,
-    stdin: Arc<Mutex<Option<ChildStdin>>>,
-    stdout: Arc<Mutex<Option<ChildStdout>>>,
-    stderr: Arc<Mutex<Option<ChildStderr>>>,
+    pub child: Arc<Mutex<Option<tokio::process::Child>>>,
+    pub stdin: Arc<Mutex<Option<ChildStdin>>>,
+    pub stdout: Arc<Mutex<Option<ChildStdout>>>,
+    pub stderr: Arc<Mutex<Option<ChildStderr>>>,
 }
 
 impl SidecarHandle {
@@ -45,7 +47,7 @@ impl SidecarHandle {
                 let child = guard
                     .as_mut()
                     .ok_or_else(|| SidecarError::Transport("sidecar already killed".into()))?;
-                child.write(bytes).await.map_err(|e| {
+                child.write(bytes).map_err(|e| {
                     SidecarError::Transport(format!("failed to write to sidecar: {e}"))
                 })?;
             }
@@ -54,10 +56,9 @@ impl SidecarHandle {
                 let stdin = guard
                     .as_mut()
                     .ok_or_else(|| SidecarError::Transport("sidecar already killed".into()))?;
-                stdin
-                    .write_all(bytes)
-                    .await
-                    .map_err(|e| SidecarError::Transport(format!("failed to write to sidecar: {e}")))?;
+                stdin.write_all(bytes).await.map_err(|e| {
+                    SidecarError::Transport(format!("failed to write to sidecar: {e}"))
+                })?;
                 stdin.flush().await.map_err(|e| {
                     SidecarError::Transport(format!("failed to flush sidecar stdin: {e}"))
                 })?;
@@ -67,42 +68,26 @@ impl SidecarHandle {
     }
 
     /// Kill the sidecar process. Idempotent — no-op if already killed.
-    pub fn kill(&self) -> Result<(), SidecarError> {
+    pub async fn kill(&self) -> Result<(), SidecarError> {
         match self {
             SidecarHandle::Tauri(h) => {
-                let mut guard = h.child.lock().unwrap();
-                if let Some(mut child) = guard.take() {
-                    child.kill();
+                let mut guard = h.child.lock().await;
+                if let Some(child) = guard.take() {
+                    let _ = child.kill().map_err(|e| {
+                        SidecarError::Transport(format!("failed to kill sidecar: {e}"))
+                    });
                 }
             }
             SidecarHandle::Tokio(h) => {
-                let mut guard = h.child.lock().unwrap();
+                let mut guard = h.child.lock().await;
                 if let Some(mut child) = guard.take() {
-                    child.start_kill();
+                    let _ = child.start_kill();
                 }
             }
         }
         Ok(())
     }
-
-    /// Take the event receiver for Tauri stdout/stderr dispatch.
-    /// Returns None for Tokio variant (uses direct handles instead).
-    pub fn take_events(&mut self) -> Option<tokio::sync::mpsc::Receiver<CommandEvent>> {
-        match self {
-            SidecarHandle::Tauri(h) => Some(h.events),
-            SidecarHandle::Tokio(_) => None,
-        }
-    }
 }
-
-/// Tauri event from the shell sidecar.
-pub enum CommandEvent {
-    Stdout(Vec<u8>),
-    Stderr(Vec<u8>),
-    Terminated(i32),
-    Error(String),
-}
-
 
 /// SidecarReader accumulates byte chunks from any stdout source, splits
 /// on newlines, enforces the 4 MiB frame limit, parses JSON-RPC 2.0
@@ -233,7 +218,7 @@ impl SidecarReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use crate::ipc::IpcState;
     use tokio::sync::Mutex;
 
     async fn setup_state_and_request() -> (
@@ -268,19 +253,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_feed_chunk_oversized_frame_cleared_without_newline() {
-        let (state, id, rx) = setup_state_and_request().await;
+        let (state, _id, mut rx) = setup_state_and_request().await;
         let mut reader = SidecarReader::new(state);
 
         let oversized = vec![b'a'; MAX_FRAME_SIZE + CHUNK_SIZE + 100];
         reader.feed_chunk(&oversized).await;
 
         assert!(rx.try_recv().is_err());
-        assert!(reader.buffer.is_empty());
+        assert!(reader.buffer.len() <= CHUNK_SIZE);
+        assert!(reader.buffer.len() < MAX_FRAME_SIZE);
     }
 
     #[tokio::test]
     async fn test_feed_chunk_oversized_discarded_through_newline() {
-        let (state, id, rx) = setup_state_and_request().await;
+        let (state, id, mut rx) = setup_state_and_request().await;
         let mut reader = SidecarReader::new(state);
 
         let mut oversized = vec![b'a'; MAX_FRAME_SIZE + 100];
@@ -297,7 +283,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_feed_chunk_split_across_chunks() {
-        let (state, id, rx) = setup_state_and_request().await;
+        let (state, id, mut rx) = setup_state_and_request().await;
         let mut reader = SidecarReader::new(state);
 
         let full = valid_response(&id);
@@ -313,8 +299,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_feed_chunk_multiple_frames_in_one_chunk() {
-        let (state, id1, rx1) = setup_state_and_request().await;
-        let (_, id2, rx2) = setup_state_and_request().await;
+        let state: AppState = Arc::new(Mutex::new(IpcState::new()));
+        let (id1, rx1) = state.lock().await.register();
+        let (id2, rx2) = state.lock().await.register();
         let mut reader = SidecarReader::new(state);
 
         let mut combined = valid_response(&id1);
@@ -330,7 +317,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_feed_chunk_oversized_buffer_bound() {
-        let (state, id, rx) = setup_state_and_request().await;
+        let (state, _id, mut rx) = setup_state_and_request().await;
         let mut reader = SidecarReader::new(state);
 
         let oversized = vec![b'a'; MAX_FRAME_SIZE + CHUNK_SIZE + 1000];

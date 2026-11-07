@@ -21,30 +21,11 @@
       }
     ],
     "security": {
-      "csp": null
-    }
-  },
-  "tauri": {
-    "allowlist": {
-      "all": false,
-      "dialog": true,
-      "fs": {
-        "all": true
-      },
-      "shell": {
-        "all": false,
-        "execute": false,
-        "open": false
-      },
-      "notification": true
-    },
-    "bundle": {
-      "active": true,
-      "externalBin": ["../bin/panther-sidecar"]
-    },
-    "security": {
       "csp": null,
       "capabilities": ["default"]
     }
+  },
+  "bundle": {
+    "active": true
   }
 }

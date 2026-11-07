@@ -20,17 +20,16 @@ struct PendingRequest {
 /// A JSON-RPC 2.0 request to send to the sidecar.
 #[derive(Debug, Serialize)]
 pub struct JsonRpcRequest {
-    jsonrpc: String,
-    id: String,
-    method: String,
+    pub jsonrpc: String,
+    pub id: String,
+    pub method: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    params: Option<Value>,
+    pub params: Option<Value>,
 }
 
 /// A JSON-RPC 2.0 response received from the sidecar.
 #[derive(Debug, Deserialize)]
 struct JsonRpcResponse {
-    jsonrpc: String,
     id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     result: Option<Value>,
@@ -136,9 +135,9 @@ mod tests {
     #[test]
     fn pending_request_lifecycle() {
         let mut state = IpcState::new();
-        let (_id, _rx) = state.register();
+        let (id, _rx) = state.register();
         assert_eq!(state.pending.len(), 1);
-        state.resolve(&uuid::Uuid::new_v4().to_string(), Err(SidecarError::NotRunning));
+        state.resolve(&id, Err(SidecarError::NotRunning));
         assert_eq!(state.pending.len(), 0);
     }
 }

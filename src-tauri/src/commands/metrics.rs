@@ -1,6 +1,7 @@
 use crate::ipc::{AppState, JsonRpcRequest, SidecarError};
 use serde::Deserialize;
 use serde_json::Value;
+use std::sync::Arc;
 use std::time::Duration;
 use tauri::State;
 
@@ -25,7 +26,7 @@ pub struct MetricArgs {
 pub async fn invoke_metric(
     args: MetricArgs,
     ipc_state: State<'_, AppState>,
-    stdin: State<'_, crate::ipc::transport::SidecarHandle>,
+    stdin: State<'_, Arc<crate::ipc::transport::SidecarHandle>>,
 ) -> Result<Value, String> {
     // 1. Register pending request
     let (id, mut rx) = {
@@ -40,9 +41,8 @@ pub async fn invoke_metric(
         method: args.method,
         params: args.params,
     };
-    let payload = serde_json::to_string(&request).map_err(|e| {
-        format!("failed to serialize request: {e}")
-    })?;
+    let payload =
+        serde_json::to_string(&request).map_err(|e| format!("failed to serialize request: {e}"))?;
 
     // 3. Write to sidecar stdin (async, never blocks the runtime)
     stdin
@@ -67,5 +67,5 @@ pub async fn invoke_metric(
     .await
     .map_err(|_| "request timed out".to_string())??;
 
-    response.map_err(|e| format!("sidecar error: {e}"))
+    Ok(response)
 }
