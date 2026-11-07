@@ -3,9 +3,6 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::time::Duration;
 use tauri::State;
-use tokio::io::AsyncWriteExt;
-use tokio::process::ChildStdin;
-use tokio::sync::Mutex;
 
 /// Command argument for fetching a metric.
 #[derive(Debug, Deserialize)]
@@ -28,7 +25,7 @@ pub struct MetricArgs {
 pub async fn invoke_metric(
     args: MetricArgs,
     ipc_state: State<'_, AppState>,
-    stdin: State<'_, Mutex<ChildStdin>>,
+    stdin: State<'_, crate::ipc::transport::SidecarHandle>,
 ) -> Result<Value, String> {
     // 1. Register pending request
     let (id, mut rx) = {
@@ -48,27 +45,21 @@ pub async fn invoke_metric(
     })?;
 
     // 3. Write to sidecar stdin (async, never blocks the runtime)
-    {
-        let mut stdin_guard = stdin.lock().await;
-        stdin_guard
-            .write_all(payload.as_bytes())
-            .await
-            .map_err(|e| format!("failed to write to sidecar: {e}"))?;
-        stdin_guard
-            .write_all(b"\n")
-            .await
-            .map_err(|e| format!("failed to write newline: {e}"))?;
-        stdin_guard
-            .flush()
-            .await
-            .map_err(|e| format!("failed to flush sidecar stdin: {e}"))?;
-    }
+    stdin
+        .write(payload.as_bytes())
+        .await
+        .map_err(|e| format!("failed to write to sidecar: {e}"))?;
 
     // 4. Await the response with a timeout
     let response = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             match tokio::time::timeout(Duration::from_millis(50), &mut rx).await {
-                Ok(result) => return result,
+                Ok(Ok(inner)) => return inner,
+                Ok(Err(_)) => {
+                    return Err(SidecarError::Transport(
+                        "oneshot channel closed without response".into(),
+                    ))
+                }
                 Err(_) => continue, // timeout, keep polling
             }
         }
