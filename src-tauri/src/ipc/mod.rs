@@ -115,6 +115,13 @@ impl IpcState {
             self.resolve(&id, Err(SidecarError::NotRunning));
         }
     }
+
+    /// Cancel a pending request by ID without sending a response.
+    /// Used when the request fails before a response can be received
+    /// (e.g., serialization error, write error, or caller timeout).
+    pub fn cancel(&mut self, id: &str) {
+        self.pending.remove(id);
+    }
 }
 
 pub type AppState = Arc<Mutex<IpcState>>;
@@ -132,5 +139,69 @@ mod tests {
         assert_eq!(state.pending.len(), 1);
         state.resolve(&id, Err(SidecarError::NotRunning));
         assert_eq!(state.pending.len(), 0);
+    }
+
+    #[test]
+    fn cancel_removes_pending_entry() {
+        let mut state = IpcState::new();
+        let (id, rx) = state.register();
+        assert_eq!(state.pending.len(), 1);
+        state.cancel(&id);
+        assert_eq!(state.pending.len(), 0);
+        // Receiver should be closed since sender was dropped
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn cancel_unknown_id_is_noop() {
+        let mut state = IpcState::new();
+        let (id, _rx) = state.register();
+        assert_eq!(state.pending.len(), 1);
+        state.cancel("unknown-id");
+        assert_eq!(state.pending.len(), 1);
+        state.cancel(&id);
+        assert_eq!(state.pending.len(), 0);
+    }
+
+    #[test]
+    fn resolve_all_not_running_fails_all_pending() {
+        let mut state = IpcState::new();
+        let (id1, rx1) = state.register();
+        let (id2, rx2) = state.register();
+        assert_eq!(state.pending.len(), 2);
+        state.resolve_all_not_running();
+        assert_eq!(state.pending.len(), 0);
+        let r1 = rx1.try_recv().expect("channel closed");
+        let r2 = rx2.try_recv().expect("channel closed");
+        assert!(matches!(r1, Err(SidecarError::NotRunning)));
+        assert!(matches!(r2, Err(SidecarError::NotRunning)));
+    }
+
+    #[test]
+    fn resolve_after_cancel_is_noop() {
+        let mut state = IpcState::new();
+        let (id, _rx) = state.register();
+        state.cancel(&id);
+        // Resolve should not panic and should not send (no receiver)
+        state.resolve(&id, Ok(serde_json::Value::Null));
+        assert_eq!(state.pending.len(), 0);
+    }
+
+    #[test]
+    fn resolve_unknown_id_is_noop() {
+        let mut state = IpcState::new();
+        state.resolve("unknown", Ok(serde_json::Value::Null));
+        assert_eq!(state.pending.len(), 0);
+    }
+
+    #[test]
+    fn resolve_all_not_running_idempotent() {
+        let mut state = IpcState::new();
+        let (id, rx) = state.register();
+        state.resolve_all_not_running();
+        state.resolve_all_not_running(); // Second call should not panic
+        assert_eq!(state.pending.len(), 0);
+        let r = rx.try_recv().expect("channel closed");
+        assert!(matches!(r, Err(SidecarError::NotRunning)));
     }
 }

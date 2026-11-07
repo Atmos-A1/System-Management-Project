@@ -41,31 +41,44 @@ pub async fn invoke_metric(
         method: args.method,
         params: args.params,
     };
-    let payload =
-        serde_json::to_string(&request).map_err(|e| format!("failed to serialize request: {e}"))?;
 
-    // 3. Write to sidecar stdin (async, never blocks the runtime)
-    stdin
-        .write(payload.as_bytes())
-        .await
-        .map_err(|e| format!("failed to write to sidecar: {e}"))?;
+    // 3. Serialize
+    let payload = match serde_json::to_string(&request) {
+        Ok(p) => p,
+        Err(e) => {
+            ipc_state.lock().await.cancel(&id);
+            return Err(format!("failed to serialize request: {e}"));
+        }
+    };
 
-    // 4. Await the response with a timeout
+    // 4. Write to sidecar stdin (async, never blocks the runtime)
+    if let Err(e) = stdin.write(payload.as_bytes()).await {
+        // Clean up pending entry on write error
+        ipc_state.lock().await.cancel(&id);
+        return Err(format!("failed to write to sidecar: {e}"));
+    }
+
+    // 5. Await response with 10s timeout
     let response = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             match tokio::time::timeout(Duration::from_millis(50), &mut rx).await {
-                Ok(Ok(inner)) => return inner,
+                Ok(Ok(inner)) => return inner, // inner: Result<Value, SidecarError>
                 Ok(Err(_)) => {
                     return Err(SidecarError::Transport(
                         "oneshot channel closed without response".into(),
                     ))
                 }
-                Err(_) => continue, // timeout, keep polling
+                Err(_) => continue,
             }
         }
     })
-    .await
-    .map_err(|_| "request timed out".to_string())??;
+    .await;
 
-    Ok(response)
+    match response {
+        Ok(inner) => Ok(inner?), // SidecarError -> String via existing From impl
+        Err(_) => {
+            ipc_state.lock().await.cancel(&id);
+            Err("request timed out".to_string())
+        }
+    }
 }

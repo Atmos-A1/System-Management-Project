@@ -179,20 +179,22 @@ impl SidecarReader {
     }
 
     /// Flush any remaining buffered bytes without a trailing newline.
+    /// After flushing, fails all pending requests with NotRunning since
+    /// the stdout stream has closed.
     pub async fn flush(&mut self) {
         if !self.buffer.is_empty() {
             let line = std::mem::take(&mut self.buffer);
             if line.len() > MAX_FRAME_SIZE {
                 eprintln!("sidecar frame exceeds {MAX_FRAME_SIZE} bytes, discarding");
-                return;
-            }
-            if let Ok(line_str) = std::str::from_utf8(&line) {
+            } else if let Ok(line_str) = std::str::from_utf8(&line) {
                 let line_str = line_str.trim_end();
                 if !line_str.is_empty() {
                     let response: JsonRpcResponse = match serde_json::from_str(line_str) {
                         Ok(r) => r,
                         Err(e) => {
                             eprintln!("failed to parse sidecar response: {e}");
+                            // Still need to fail pending requests
+                            self.fail_all().await;
                             return;
                         }
                     };
@@ -211,7 +213,16 @@ impl SidecarReader {
                 }
             }
         }
+        // Stdout stream closed - fail all remaining pending requests
+        self.fail_all().await;
         eprintln!("sidecar stdout stream closed");
+    }
+
+    /// Resolve all pending requests with NotRunning error.
+    /// Called when the sidecar process terminates or stdout closes.
+    async fn fail_all(&mut self) {
+        let mut state_guard = self.state.lock().await;
+        state_guard.resolve_all_not_running();
     }
 }
 
@@ -325,5 +336,55 @@ mod tests {
 
         assert!(reader.buffer.len() <= MAX_FRAME_SIZE + CHUNK_SIZE);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_flush_fails_pending_requests() {
+        let state: AppState = Arc::new(Mutex::new(IpcState::new()));
+        let (id1, rx1) = state.lock().await.register();
+        let (id2, rx2) = state.lock().await.register();
+        let mut reader = SidecarReader::new(state);
+
+        // No data fed, just flush - should fail both pending requests
+        reader.flush().await;
+
+        let r1 = rx1.await.expect("channel closed");
+        let r2 = rx2.await.expect("channel closed");
+        assert!(matches!(r1, Err(SidecarError::NotRunning)));
+        assert!(matches!(r2, Err(SidecarError::NotRunning)));
+    }
+
+    #[tokio::test]
+    async fn test_flush_processes_buffer_then_fails_remaining() {
+        let state: AppState = Arc::new(Mutex::new(IpcState::new()));
+        let (id1, rx1) = state.lock().await.register();
+        let (id2, rx2) = state.lock().await.register();
+        let mut reader = SidecarReader::new(state);
+
+        // Feed one valid response, then flush
+        reader.feed_chunk(&valid_response(&id1)).await;
+        reader.flush().await;
+
+        // id1 should get the response, id2 should get NotRunning
+        let r1 = rx1.await.expect("channel closed");
+        let r2 = rx2.await.expect("channel closed");
+        assert!(r1.is_ok());
+        assert!(matches!(r2, Err(SidecarError::NotRunning)));
+    }
+
+    #[tokio::test]
+    async fn test_late_response_after_flush_ignored() {
+        let state: AppState = Arc::new(Mutex::new(IpcState::new()));
+        let (id, rx) = state.lock().await.register();
+        let mut reader = SidecarReader::new(state);
+
+        // Flush first (fails pending)
+        reader.flush().await;
+        // Then feed a late response for the same ID
+        reader.feed_chunk(&valid_response(&id)).await;
+
+        // The late response should be ignored (channel already closed)
+        let r = rx.await.expect("channel closed");
+        assert!(matches!(r, Err(SidecarError::NotRunning)));
     }
 }
