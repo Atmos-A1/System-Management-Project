@@ -1,6 +1,7 @@
 use crate::commands::metrics::invoke_metric;
 use crate::ipc::transport::{SidecarHandle, CHUNK_SIZE};
 use crate::ipc::{AppState, IpcState};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use tauri::Manager;
@@ -12,6 +13,59 @@ use tokio::sync::Mutex;
 
 mod commands;
 mod ipc;
+
+/// Resolve the Python package root directory (the one containing `panther/`).
+///
+/// When running via `cargo run` from `src-tauri`, `std::env::current_dir()` returns
+/// `<repo>/src-tauri`, but the Python package lives at `<repo>/src` (sibling of `src-tauri`).
+/// This function finds it robustly by checking candidates in order:
+/// 1. Walking up from `current_dir()` to find a directory containing
+///    `src/panther/sidecar` (verifies the real package layout at runtime).
+/// 2. `CARGO_MANIFEST_DIR/../src` (compile-time known, correct for dev runs
+///    where the manifest dir is `<repo>/src-tauri`).
+/// If neither is verified, it still returns candidate 2 and logs a diagnostic.
+fn resolve_dev_src_dir() -> PathBuf {
+    // Candidate 1: CARGO_MANIFEST_DIR/../src (compile-time known, correct for dev)
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let candidate1 = manifest_dir.join("../src");
+
+    // Candidate 2: walk up from current_dir looking for src/panther/sidecar
+    let mut candidate2 = None;
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut dir = Some(cwd.as_path());
+        while let Some(d) = dir {
+            let check = d.join("src/panther/sidecar");
+            if check.exists() {
+                candidate2 = Some(d.join("src"));
+                break;
+            }
+            dir = d.parent();
+        }
+    }
+
+    // Prefer the runtime-verified cwd walk; fall back to the manifest-relative path.
+    match candidate2 {
+        Some(dir) => dir,
+        None => {
+            eprintln!(
+                "[sidecar] could not locate Python package root via cwd walk; using CARGO_MANIFEST_DIR/../src = {}",
+                candidate1.display()
+            );
+            candidate1
+        }
+    }
+}
+
+/// Kill the sidecar and fail any outstanding IPC requests.
+/// Uses `tauri::async_runtime::spawn` because window event callbacks run on
+/// the GTK main thread, outside any Tokio runtime context (`tokio::spawn`
+/// panics there).
+fn spawn_sidecar_cleanup(handle: Arc<SidecarHandle>, ipc_state: AppState) {
+    tauri::async_runtime::spawn(async move {
+        let _ = handle.kill().await;
+        ipc_state.lock().await.resolve_all_not_running();
+    });
+}
 
 fn spawn_dev_sidecar(src_dir: &str) -> SidecarHandle {
     let mut child = Command::new("python")
@@ -56,11 +110,9 @@ fn main() {
             //    and looked up by name ("panther-sidecar").
             //    Development: no frozen binary exists yet, so fall back to
             //    spawning `python -m panther.sidecar.server` directly.
-            let project_dir = std::env::current_dir()
-                .unwrap_or_default()
+            let src_dir = resolve_dev_src_dir()
                 .to_string_lossy()
                 .to_string();
-            let src_dir = format!("{project_dir}/src");
 
             let sidecar_handle: SidecarHandle = match app
                 .shell()
@@ -185,12 +237,7 @@ fn main() {
                 .expect("main window not found");
             window.on_window_event(move |event| {
                 if matches!(event, tauri::WindowEvent::Destroyed) {
-                    let handle = handle_for_shutdown.clone();
-                    let ipc_state = ipc_state_for_shutdown.clone();
-                    tokio::spawn(async move {
-                        let _ = handle.kill().await;
-                        ipc_state.lock().await.resolve_all_not_running();
-                    });
+                    spawn_sidecar_cleanup(handle_for_shutdown.clone(), ipc_state_for_shutdown.clone());
                 }
             });
 
@@ -199,4 +246,64 @@ fn main() {
         .invoke_handler(tauri::generate_handler![invoke_metric])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipc::SidecarError;
+
+    #[test]
+    fn dev_src_dir_points_at_python_package_root() {
+        let src_dir = resolve_dev_src_dir();
+        // The resolved path must contain panther/sidecar (the Python package)
+        let sidecar_dir = src_dir.join("panther/sidecar");
+        assert!(
+            sidecar_dir.exists(),
+            "resolved src_dir {:?} does not contain panther/sidecar",
+            src_dir
+        );
+        // It must NOT be the src-tauri/src directory (which doesn't have panther/)
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let wrong_dir = manifest_dir.join("src");
+        assert_ne!(
+            src_dir, wrong_dir,
+            "resolved src_dir incorrectly points at src-tauri/src"
+        );
+    }
+
+    #[test]
+    fn cleanup_runs_outside_tokio_runtime() {
+        // Window event callbacks run on the GTK main thread, outside any Tokio
+        // runtime. This test deliberately runs on a plain std thread with no
+        // ambient runtime: `tokio::spawn` would panic here, `tauri::async_runtime::spawn` must not.
+        // Build IPC state with two pending requests — no lock needed since we
+        // populate it before wrapping in the mutex.
+        let mut ipc = IpcState::new();
+        let (_id1, rx1) = ipc.register();
+        let (_id2, rx2) = ipc.register();
+        let state: AppState = Arc::new(Mutex::new(ipc));
+
+        // Build a sidecar handle with all Option fields None, so kill() is a no-op.
+        let handle = Arc::new(SidecarHandle::Tokio(
+            crate::ipc::transport::TokioSidecarHandle {
+                child: Arc::new(Mutex::new(None)),
+                stdin: Arc::new(Mutex::new(None)),
+                stdout: Arc::new(Mutex::new(None)),
+                stderr: Arc::new(Mutex::new(None)),
+            },
+        ));
+
+        // Call the cleanup function directly — this test fn has no #[tokio::test],
+        // so there is NO Tokio runtime. This would panic with tokio::spawn.
+        spawn_sidecar_cleanup(handle, state);
+
+        // Wait for the async tasks to complete by blocking on the receivers.
+        // tokio::sync::oneshot::Receiver::blocking_recv() blocks until a value
+        // or closed channel, and does not require a runtime.
+        let r1 = rx1.blocking_recv().expect("channel closed");
+        let r2 = rx2.blocking_recv().expect("channel closed");
+        assert!(matches!(r1, Err(SidecarError::NotRunning)));
+        assert!(matches!(r2, Err(SidecarError::NotRunning)));
+    }
 }

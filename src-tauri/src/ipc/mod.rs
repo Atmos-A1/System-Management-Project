@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn cancel_removes_pending_entry() {
         let mut state = IpcState::new();
-        let (id, rx) = state.register();
+        let (id, mut rx) = state.register();
         assert_eq!(state.pending.len(), 1);
         state.cancel(&id);
         assert_eq!(state.pending.len(), 0);
@@ -166,8 +166,8 @@ mod tests {
     #[test]
     fn resolve_all_not_running_fails_all_pending() {
         let mut state = IpcState::new();
-        let (id1, rx1) = state.register();
-        let (id2, rx2) = state.register();
+        let (_id1, mut rx1) = state.register();
+        let (_id2, mut rx2) = state.register();
         assert_eq!(state.pending.len(), 2);
         state.resolve_all_not_running();
         assert_eq!(state.pending.len(), 0);
@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn resolve_all_not_running_idempotent() {
         let mut state = IpcState::new();
-        let (id, rx) = state.register();
+        let (_id, mut rx) = state.register();
         state.resolve_all_not_running();
         state.resolve_all_not_running(); // Second call should not panic
         assert_eq!(state.pending.len(), 0);

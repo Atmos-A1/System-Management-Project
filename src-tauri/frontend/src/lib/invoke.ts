@@ -7,7 +7,9 @@ export interface MetricArgs {
 
 export async function invokeMetric(args: MetricArgs): Promise<unknown> {
   return invoke("invoke_metric", {
-    method: args.method,
-    params: args.params,
+    args: {
+      method: args.method,
+      params: args.params,
+    },
   });
 }

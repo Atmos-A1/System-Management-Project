@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use super::{AppState, JsonRpcResponse, SidecarError};
@@ -12,6 +13,19 @@ const MAX_FRAME_SIZE: usize = 4 * 1024 * 1024;
 // Fixed-size async read buffer; also the allowance above MAX_FRAME_SIZE
 // before SidecarReader discards buffered data to prevent unbounded growth.
 pub const CHUNK_SIZE: usize = 64 * 1024;
+
+/// JSON-RPC frames on the sidecar stdio channel are newline-delimited.
+/// Ensure exactly one trailing `\n` so the Python reader (`readline()`) dispatches it.
+fn ensure_frame_terminator(bytes: &[u8]) -> Cow<'_, [u8]> {
+    if bytes.ends_with(b"\n") {
+        Cow::Borrowed(bytes)
+    } else {
+        let mut v = Vec::with_capacity(bytes.len() + 1);
+        v.extend_from_slice(bytes);
+        v.push(b'\n');
+        Cow::Owned(v)
+    }
+}
 
 /// Concrete handle to a spawned sidecar process, supporting both Tauri
 /// production sidecar and Tokio development fallback without forcing
@@ -40,14 +54,16 @@ pub struct TokioSidecarHandle {
 
 impl SidecarHandle {
     /// Write JSON-RPC request bytes to sidecar stdin.
+    /// Guarantees a trailing newline frame terminator for the Python reader.
     pub async fn write(&self, bytes: &[u8]) -> Result<(), SidecarError> {
+        let framed = ensure_frame_terminator(bytes);
         match self {
             SidecarHandle::Tauri(h) => {
                 let mut guard = h.child.lock().await;
                 let child = guard
                     .as_mut()
                     .ok_or_else(|| SidecarError::Transport("sidecar already killed".into()))?;
-                child.write(bytes).map_err(|e| {
+                child.write(&framed).map_err(|e| {
                     SidecarError::Transport(format!("failed to write to sidecar: {e}"))
                 })?;
             }
@@ -56,7 +72,7 @@ impl SidecarHandle {
                 let stdin = guard
                     .as_mut()
                     .ok_or_else(|| SidecarError::Transport("sidecar already killed".into()))?;
-                stdin.write_all(bytes).await.map_err(|e| {
+                stdin.write_all(&framed).await.map_err(|e| {
                     SidecarError::Transport(format!("failed to write to sidecar: {e}"))
                 })?;
                 stdin.flush().await.map_err(|e| {
@@ -341,8 +357,8 @@ mod tests {
     #[tokio::test]
     async fn test_flush_fails_pending_requests() {
         let state: AppState = Arc::new(Mutex::new(IpcState::new()));
-        let (id1, rx1) = state.lock().await.register();
-        let (id2, rx2) = state.lock().await.register();
+        let (_id1, rx1) = state.lock().await.register();
+        let (_id2, rx2) = state.lock().await.register();
         let mut reader = SidecarReader::new(state);
 
         // No data fed, just flush - should fail both pending requests
@@ -358,7 +374,7 @@ mod tests {
     async fn test_flush_processes_buffer_then_fails_remaining() {
         let state: AppState = Arc::new(Mutex::new(IpcState::new()));
         let (id1, rx1) = state.lock().await.register();
-        let (id2, rx2) = state.lock().await.register();
+        let (_id2, rx2) = state.lock().await.register();
         let mut reader = SidecarReader::new(state);
 
         // Feed one valid response, then flush
@@ -386,5 +402,43 @@ mod tests {
         // The late response should be ignored (channel already closed)
         let r = rx.await.expect("channel closed");
         assert!(matches!(r, Err(SidecarError::NotRunning)));
+    }
+
+    #[test]
+    fn ensure_frame_terminator_appends_newline() {
+        let input = b"{\"jsonrpc\":\"2.0\",\"id\":\"x\",\"method\":\"test\",\"params\":{}}";
+        let framed = ensure_frame_terminator(input);
+        assert!(framed.ends_with(b"\n"), "must end with newline");
+        assert_eq!(
+            &framed[..input.len()],
+            input,
+            "original content must be preserved"
+        );
+        // Exactly one newline appended
+        assert_eq!(framed.len(), input.len() + 1);
+    }
+
+    #[test]
+    fn ensure_frame_terminator_does_not_double_terminate() {
+        let input = b"{\"jsonrpc\":\"2.0\",\"id\":\"x\",\"method\":\"test\",\"params\":{}}\n";
+        let framed = ensure_frame_terminator(input);
+        assert!(framed.ends_with(b"\n"), "must end with newline");
+        // Should return borrowed, unchanged
+        assert_eq!(framed.len(), input.len(), "must not append another newline");
+        assert!(
+            matches!(framed, Cow::Borrowed(_)),
+            "must borrow when already terminated"
+        );
+    }
+
+    #[test]
+    fn ensure_frame_terminator_handles_empty() {
+        let input = b"";
+        let framed = ensure_frame_terminator(input);
+        assert_eq!(
+            framed,
+            b"\n".as_slice(),
+            "empty input becomes single newline"
+        );
     }
 }

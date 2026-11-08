@@ -82,3 +82,51 @@ pub async fn invoke_metric(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Guard the Tauri v2 contract: the frontend invoke.ts must pass the `args` wrapper
+    /// because the Rust command parameter is named `args`.
+    #[test]
+    fn frontend_invoke_ts_wraps_payload_in_args() {
+        let invoke_ts = include_str!("../../frontend/src/lib/invoke.ts");
+        // Tauri v2 passes command arguments by name, so the JS payload must be { args: { ... } }
+        assert!(
+            invoke_ts.contains("invoke_metric"),
+            "invoke.ts must call invoke(\"invoke_metric\", ...)"
+        );
+        assert!(
+            invoke_ts.contains("args:"),
+            "invoke.ts must wrap the payload in an `args:` key to match the Rust command parameter name (Tauri v2 contract)"
+        );
+        assert!(
+            invoke_ts.contains("method:"),
+            "invoke.ts must include the method field inside the args wrapper"
+        );
+    }
+
+    /// Test that MetricArgs deserializes from the exact inner object shape the frontend builds.
+    #[test]
+    fn metric_args_deserializes_from_inner_object() {
+        let json = r#"{"method":"system_monitor.get_cpu_percent","params":{}}"#;
+        let args: MetricArgs =
+            serde_json::from_str(json).expect("failed to deserialize MetricArgs");
+        assert_eq!(args.method, "system_monitor.get_cpu_percent");
+        assert_eq!(
+            args.params,
+            Some(serde_json::Value::Object(serde_json::Map::new()))
+        );
+    }
+
+    /// Test that MetricArgs handles missing params (defaults to None).
+    #[test]
+    fn metric_args_deserializes_without_params() {
+        let json = r#"{"method":"system_monitor.get_ram_usage"}"#;
+        let args: MetricArgs =
+            serde_json::from_str(json).expect("failed to deserialize MetricArgs");
+        assert_eq!(args.method, "system_monitor.get_ram_usage");
+        assert_eq!(args.params, None);
+    }
+}
