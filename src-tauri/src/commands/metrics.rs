@@ -30,14 +30,18 @@ pub async fn invoke_metric(
     ipc_state: State<'_, AppState>,
     stdin: State<'_, SidecarRef>,
 ) -> Result<Value, String> {
-    // Check if sidecar is running
-    let handle = stdin.lock().await;
-    if handle.is_none() {
+    // Check if the sidecar is running and clone a shared handle out of the
+    // lock. `clone_handles` shares the same Arc-backed transport, so the lock
+    // is released before any await point.
+    let handle = {
+        let guard = stdin.lock().unwrap_or_else(|e| e.into_inner());
+        guard.as_ref().map(|h| h.clone_handles())
+    };
+    let Some(handle) = handle else {
         return Err(
             "system service is not running; Panther may not have installed correctly".to_string(),
         );
-    }
-    drop(handle); // Release the lock before the async operations
+    };
 
     // 1. Register pending request
     let (id, mut rx) = {
@@ -63,7 +67,7 @@ pub async fn invoke_metric(
     };
 
     // 4. Write to sidecar stdin (async, never blocks the runtime)
-    if let Err(e) = stdin.write(payload.as_bytes()).await {
+    if let Err(e) = handle.write(payload.as_bytes()).await {
         // Clean up pending entry on write error
         ipc_state.lock().await.cancel(&id);
         return Err(format!("failed to write to sidecar: {e}"));

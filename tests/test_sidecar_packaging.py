@@ -215,11 +215,17 @@ def test_main_rs_env_vars():
 
 
 def test_main_rs_sidecar_ref_type():
-    """ipc/mod.rs defines SidecarRef as Arc<Option<SidecarHandle>>."""
+    """ipc/mod.rs defines SidecarRef as Arc<std::sync::Mutex<Option<SidecarHandle>>>.
+
+    A std::sync::Mutex is required because Tauri's `setup` hook is a
+    synchronous closure: it cannot `.await`, so the ref must be lockable
+    without an async runtime. See metrics.rs for the read side.
+    """
     ipc_mod = REPO_ROOT / "src-tauri/src/ipc/mod.rs"
     content = ipc_mod.read_text()
     assert "SidecarRef" in content
-    assert "Arc<Mutex<Option<crate::ipc::transport::SidecarHandle>>>" in content
+    assert "std::sync::Mutex<Option<crate::ipc::transport::SidecarHandle>>" in content
+    assert "Arc<std::sync::Mutex" in content
 
 
 def test_main_rs_always_manages_ref():
@@ -262,10 +268,12 @@ def test_metrics_rs_accepts_sidecar_ref():
 
 
 def test_metrics_rs_returns_honest_error_when_none():
-    """metrics.rs returns honest error when sidecar is None."""
+    """metrics.rs returns an honest error when the sidecar ref is None."""
     metrics_rs = REPO_ROOT / "src-tauri/src/commands/metrics.rs"
     content = metrics_rs.read_text()
-    assert "is_none()" in content or "is_none" in content
+    # The handle is cloned out of the std lock; absence is reported, not ignored.
+    assert "let Some(handle) = handle else" in content
+    assert "return Err(" in content
     assert "not running" in content.lower() or "not installed" in content.lower()
 
 
@@ -318,7 +326,7 @@ def test_windows_workflow_smoke_test_uses_processstartinfo():
     content = workflow.read_text()
     assert "ProcessStartInfo" in content, "Smoke test must use ProcessStartInfo"
     assert "RedirectStandardInput" in content, "Must redirect stdin"
-    assert "RedirectStandardInput \$null" not in content, "Must not use dead \$null redirection"
+    assert "RedirectStandardInput \\$null" not in content, "Must not use dead \\$null redirection"
     assert "StandardInput.WriteLine" in content, "Must write to stdin via WriteLine"
     assert "StandardInput.Close" in content, "Must close stdin"
 

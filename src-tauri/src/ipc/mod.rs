@@ -129,7 +129,14 @@ pub type AppState = Arc<Mutex<IpcState>>;
 /// Sidecar reference: always managed, `Some` when running, `None` when not available.
 /// This allows the app to start even if the sidecar fails to spawn, and commands
 /// return an honest "not running" error instead of silently failing.
-pub type SidecarRef = Arc<Mutex<Option<crate::ipc::transport::SidecarHandle>>>;
+///
+/// A `std::sync::Mutex` is deliberate: this ref is set once during Tauri's
+/// `setup` hook and read by async commands. `setup` is a synchronous closure,
+/// so it cannot `.await`, and `blocking_lock()` would panic if `setup` ever ran
+/// inside a runtime context. The critical section is a single move of a
+/// short-lived handle, so no `.await` is ever held while the lock is held.
+pub type SidecarRef =
+    Arc<std::sync::Mutex<Option<crate::ipc::transport::SidecarHandle>>>;
 
 pub mod transport;
 

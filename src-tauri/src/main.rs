@@ -62,7 +62,10 @@ fn resolve_dev_src_dir() -> PathBuf {
 /// panics there).
 fn spawn_sidecar_cleanup(handle: SidecarRef, ipc_state: AppState) {
     tauri::async_runtime::spawn(async move {
-        if let Some(h) = &*handle.lock().await {
+        // Take the handle out under the sync lock, then release before awaiting
+        // kill so the critical section never spans an await point.
+        let taken = handle.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(h) = taken {
             let _ = h.kill().await;
         }
         ipc_state.lock().await.resolve_all_not_running();
@@ -120,8 +123,9 @@ fn main() {
                 .to_string_lossy()
                 .to_string();
 
-            // SidecarRef: Arc<Option<SidecarHandle>> — always managed, Some on success, None on failure.
-            let sidecar_ref: SidecarRef = Arc::new(Mutex::new(None));
+            // SidecarRef: Arc<std::sync::Mutex<Option<SidecarHandle>>> — always
+            // managed, Some on success, None on failure.
+            let sidecar_ref: SidecarRef = Arc::new(std::sync::Mutex::new(None));
 
             let sidecar_result = app
                 .shell()
@@ -154,10 +158,8 @@ fn main() {
                         spawn_dev_sidecar(&src_dir)
                     } else {
                         eprintln!("[sidecar] failed to spawn bundled sidecar: {err}");
-                        // In production, we still manage the ref as None so the app doesn't crash.
-                        // Commands will return an honest "not running" error.
-                        *sidecar_ref.lock().await = None;
-                        // Still manage IPC state and ref so the app starts.
+                        // Leave the ref as None: commands then return an honest
+                        // "not running" error instead of crashing the app.
                         app.manage(ipc_state.clone());
                         app.manage(sidecar_ref.clone());
                         // Return Ok(()) so the app launches and surfaces the honest error via commands.
@@ -167,112 +169,114 @@ fn main() {
             };
 
             // Store the successful handle in the ref
-            *sidecar_ref.lock().await = Some(sidecar_handle);
+            *sidecar_ref.lock().unwrap_or_else(|e| e.into_inner()) = Some(sidecar_handle);
 
             // 3. Manage IPC state and sidecar ref (always managed, even if sidecar is None).
             app.manage(ipc_state.clone());
             app.manage(sidecar_ref.clone());
 
             // 4. Read stderr diagnostics on a background task (source-agnostic).
+            //    Clone the inner Arc out under the sync lock and release it
+            //    before any await: a std::sync guard can never be held across
+            //    an await point.
             let handle_for_stderr = sidecar_ref.clone();
-            tokio::spawn(async move {
-                let guard = handle_for_stderr.lock().await;
-                if let Some(handle) = guard.as_ref() {
-                    match handle {
-                        SidecarHandle::Tauri(_) => {
-                            // Stderr handled by the events consumer below.
-                        }
-                        SidecarHandle::Tokio(h) => {
-                            let stderr = h.stderr.clone();
-                            tokio::spawn(async move {
-                                let reader =
-                                    tokio::io::BufReader::new(stderr.lock().await.take().expect("sidecar has no stderr"));
-                                let mut lines = reader.lines();
-                                while let Ok(Some(line)) = lines.next_line().await {
-                                    eprintln!("[sidecar stderr] {line}");
-                                }
-                            });
-                        }
+            if let Some(stderr) = handle_for_stderr
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .and_then(|handle| match handle {
+                    SidecarHandle::Tauri(_) => None,
+                    SidecarHandle::Tokio(h) => Some(h.stderr.clone()),
+                })
+            {
+                tokio::spawn(async move {
+                    let reader = tokio::io::BufReader::new(
+                        stderr.lock().await.take().expect("sidecar has no stderr"),
+                    );
+                    let mut lines = reader.lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        eprintln!("[sidecar stderr] {line}");
                     }
-                }
-            });
+                });
+            }
 
             // 5. Spawn the single stdout reader task (source-agnostic byte parsing).
-            let ipc_state_for_reader = ipc_state.clone();
-            let handle_for_reader = sidecar_ref.clone();
-            tokio::spawn(async move {
-                let guard = handle_for_reader.lock().await;
-                if let Some(handle) = guard.as_ref() {
+            //    Only the inner channel/pipe handles are cloned out under the
+            //    sync lock; the guard is released before any await because a
+            //    std::sync guard cannot be held across an await point.
+            let reader_source = {
+                let guard = sidecar_ref.lock().unwrap_or_else(|e| e.into_inner());
+                guard.as_ref().map(|h| h.clone_handles())
+            };
+
+            if let Some(handle) = reader_source {
+                let state = ipc_state.clone();
+                tokio::spawn(async move {
                     match handle {
                         SidecarHandle::Tauri(h) => {
                             let events = h.events.clone();
-                            let state = ipc_state_for_reader.clone();
-                            tokio::spawn(async move {
-                                let mut reader = crate::ipc::transport::SidecarReader::new(state);
-                                loop {
-                                    let event = {
-                                        let mut guard = events.lock().await;
-                                        match guard.as_mut() {
-                                            Some(rx) => rx.recv().await,
-                                            None => None,
-                                        }
-                                    };
-                                    match event {
-                                        Some(CommandEvent::Stdout(payload)) => {
-                                            reader.feed_chunk(&payload).await;
-                                        }
-                                        Some(CommandEvent::Stderr(payload)) => {
-                                            eprintln!(
-                                                "[sidecar stderr] {}",
-                                                String::from_utf8_lossy(&payload)
-                                            );
-                                        }
-                                        Some(CommandEvent::Terminated(payload)) => {
-                                            eprintln!("[sidecar] exited with code {:?}, signal {:?}", payload.code, payload.signal);
-                                            // Take the child out of the handle so subsequent writes fail fast.
-                                            let _ = h.child.lock().await.take();
-                                            break;
-                                        }
-                                        Some(CommandEvent::Error(msg)) => {
-                                            eprintln!("[sidecar] error: {msg}");
-                                            break;
-                                        }
-                                        Some(_) => {
-                                            // Non-exhaustive enum catch-all
-                                            eprintln!("[sidecar] unexpected event");
-                                        }
-                                        None => break, // channel closed
+                            let child = h.child.clone();
+                            let mut reader = crate::ipc::transport::SidecarReader::new(state);
+                            loop {
+                                let event = {
+                                    let mut guard = events.lock().await;
+                                    match guard.as_mut() {
+                                        Some(rx) => rx.recv().await,
+                                        None => None,
                                     }
+                                };
+                                match event {
+                                    Some(CommandEvent::Stdout(payload)) => {
+                                        reader.feed_chunk(&payload).await;
+                                    }
+                                    Some(CommandEvent::Stderr(payload)) => {
+                                        eprintln!(
+                                            "[sidecar stderr] {}",
+                                            String::from_utf8_lossy(&payload)
+                                        );
+                                    }
+                                    Some(CommandEvent::Terminated(payload)) => {
+                                        eprintln!("[sidecar] exited with code {:?}, signal {:?}", payload.code, payload.signal);
+                                        // Take the child out of the handle so subsequent writes fail fast.
+                                        let _ = child.lock().await.take();
+                                        break;
+                                    }
+                                    Some(CommandEvent::Error(msg)) => {
+                                        eprintln!("[sidecar] error: {msg}");
+                                        break;
+                                    }
+                                    Some(_) => {
+                                        // Non-exhaustive enum catch-all
+                                        eprintln!("[sidecar] unexpected event");
+                                    }
+                                    None => break, // channel closed
                                 }
-                                reader.flush().await;
-                            });
+                            }
+                            reader.flush().await;
                         }
                         SidecarHandle::Tokio(h) => {
                             let stdout = h.stdout.clone();
-                            let state = ipc_state_for_reader.clone();
-                            tokio::spawn(async move {
-                                let mut reader = crate::ipc::transport::SidecarReader::new(state);
-                                let stdout_handle =
-                                    stdout.lock().await.take().expect("sidecar has no stdout");
-                                let mut stdout_reader = tokio::io::BufReader::new(stdout_handle);
-                                let mut buf = [0u8; CHUNK_SIZE];
-                                loop {
-                                    let n = match stdout_reader.read(&mut buf).await {
-                                        Ok(0) => break, // EOF
-                                        Ok(n) => n,
-                                        Err(e) => {
-                                            eprintln!("sidecar stdout read error: {e}");
-                                            break;
-                                        }
-                                    };
-                                    reader.feed_chunk(&buf[..n]).await;
-                                }
-                                reader.flush().await;
-                            });
+                            let mut reader = crate::ipc::transport::SidecarReader::new(state);
+                            let mut stdout_reader = tokio::io::BufReader::new(
+                                stdout.lock().await.take().expect("sidecar has no stdout"),
+                            );
+                            let mut buf = [0u8; CHUNK_SIZE];
+                            loop {
+                                let n = match stdout_reader.read(&mut buf).await {
+                                    Ok(0) => break, // EOF
+                                    Ok(n) => n,
+                                    Err(e) => {
+                                        eprintln!("sidecar stdout read error: {e}");
+                                        break;
+                                    }
+                                };
+                                reader.feed_chunk(&buf[..n]).await;
+                            }
+                            reader.flush().await;
                         }
                     }
-                }
-            });
+                });
+            }
 
             // 6. Register shutdown handler: kill sidecar process and resolve pending IPC requests.
             let handle_for_shutdown = sidecar_ref.clone();
@@ -330,7 +334,7 @@ mod tests {
         let state: AppState = Arc::new(Mutex::new(ipc));
 
         // Build a SidecarRef with None (simulating sidecar not running).
-        let handle: SidecarRef = Arc::new(Mutex::new(None));
+        let handle: SidecarRef = Arc::new(std::sync::Mutex::new(None));
 
         // Call the cleanup function directly — this test fn has no #[tokio::test],
         // so there is NO Tokio runtime. This would panic with tokio::spawn.

@@ -53,6 +53,29 @@ pub struct TokioSidecarHandle {
 }
 
 impl SidecarHandle {
+    /// Clone the inner handles into a standalone value.
+    ///
+    /// `SidecarHandle` itself is not `Clone` (it represents at-most-once
+    /// ownership of the transport), but every field is an `Arc`, so a
+    /// duplicate handle that shares the same child/stdin/events is safe and
+    /// cheap. This lets callers take the handle out of the `SidecarRef` lock
+    /// before awaiting, since a `std::sync::Mutex` guard cannot be held
+    /// across an await point.
+    pub fn clone_handles(&self) -> Self {
+        match self {
+            SidecarHandle::Tauri(h) => SidecarHandle::Tauri(TauriSidecarHandle {
+                child: h.child.clone(),
+                events: h.events.clone(),
+            }),
+            SidecarHandle::Tokio(h) => SidecarHandle::Tokio(TokioSidecarHandle {
+                child: h.child.clone(),
+                stdin: h.stdin.clone(),
+                stdout: h.stdout.clone(),
+                stderr: h.stderr.clone(),
+            }),
+        }
+    }
+
     /// Write JSON-RPC request bytes to sidecar stdin.
     /// Guarantees a trailing newline frame terminator for the Python reader.
     pub async fn write(&self, bytes: &[u8]) -> Result<(), SidecarError> {
