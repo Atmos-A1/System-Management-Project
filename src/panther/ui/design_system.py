@@ -63,8 +63,6 @@ LIGHT_COLORS = ColorPalette(
     border="#e2e8f0",
     border_strong="#cbd5e1",
     text_primary="#0f172a",
-    # Slightly darker than slate-500 so secondary text clears 4.5:1 on the
-    # canvas (#f5f7fa), not only on white card surfaces.
     text_secondary="#55657c",
     accent="#2563eb",
     accent_hover="#1d4ed8",

@@ -5,8 +5,15 @@ __pycache__/
 
 # PyInstaller build outputs
 build/
+build/sidecar-*/
 dist/
 *.spec
+
+# Tauri sidecar binaries (built by PyInstaller, copied here for bundling)
+src-tauri/binaries/
+
+# Tauri generated schemas
+src-tauri/gen/schemas/
 
 # Application runtime data & logs
 data/

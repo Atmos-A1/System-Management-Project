@@ -126,6 +126,11 @@ impl IpcState {
 
 pub type AppState = Arc<Mutex<IpcState>>;
 
+/// Sidecar reference: always managed, `Some` when running, `None` when not available.
+/// This allows the app to start even if the sidecar fails to spawn, and commands
+/// return an honest "not running" error instead of silently failing.
+pub type SidecarRef = Arc<Mutex<Option<crate::ipc::transport::SidecarHandle>>>;
+
 pub mod transport;
 
 #[cfg(test)]

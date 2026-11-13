@@ -1,7 +1,6 @@
-use crate::ipc::{AppState, JsonRpcRequest, SidecarError};
+use crate::ipc::{AppState, JsonRpcRequest, SidecarError, SidecarRef};
 use serde::Deserialize;
 use serde_json::Value;
-use std::sync::Arc;
 use std::time::Duration;
 use tauri::State;
 
@@ -22,12 +21,24 @@ pub struct MetricArgs {
 /// 3. Awaits the matching response on the shared IPC state with a
 ///    10-second timeout.
 /// 4. Returns the result or a controlled error.
+///
+/// If the sidecar is not running (None in SidecarRef), returns an honest
+/// error instead of silently failing.
 #[tauri::command]
 pub async fn invoke_metric(
     args: MetricArgs,
     ipc_state: State<'_, AppState>,
-    stdin: State<'_, Arc<crate::ipc::transport::SidecarHandle>>,
+    stdin: State<'_, SidecarRef>,
 ) -> Result<Value, String> {
+    // Check if sidecar is running
+    let handle = stdin.lock().await;
+    if handle.is_none() {
+        return Err(
+            "system service is not running; Panther may not have installed correctly".to_string(),
+        );
+    }
+    drop(handle); // Release the lock before the async operations
+
     // 1. Register pending request
     let (id, mut rx) = {
         let mut guard = ipc_state.lock().await;

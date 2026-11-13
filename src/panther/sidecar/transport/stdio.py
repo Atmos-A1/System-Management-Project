@@ -17,6 +17,40 @@ class FrameTooLargeError(Exception):
     """Raised when an input line exceeds the 4 MiB frame limit."""
 
 
+def configure_stdio() -> None:
+    """Reconfigure stdin/stdout/stderr for UTF-8 with safe error handling.
+
+    On Windows, the default encoding is often cp1252, which causes
+    UnicodeEncodeError when non-ASCII process names or paths appear in
+    diagnostics. This sets UTF-8 with backslashreplace so such characters
+    are escaped rather than crashing the process.
+
+    Idempotent and safe to call multiple times. Cheap to import.
+    """
+    # stdin: ensure text mode with UTF-8, universal newlines (newline=None)
+    if hasattr(sys.stdin, "reconfigure"):
+        try:
+            sys.stdin.reconfigure(encoding="utf-8", errors="backslashreplace", newline=None)
+        except Exception:
+            pass
+
+    # stdout: protocol stream — UTF-8, line buffered, no error substitution on output
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(
+                encoding="utf-8", errors="backslashreplace", newline="\n", line_buffering=True
+            )
+        except Exception:
+            pass
+
+    # stderr: diagnostics — UTF-8, backslashreplace for safety
+    if hasattr(sys.stderr, "reconfigure"):
+        try:
+            sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace", newline="\n")
+        except Exception:
+            pass
+
+
 def log_diagnostic(message: str) -> None:
     """Write a diagnostic message to stderr only.
 

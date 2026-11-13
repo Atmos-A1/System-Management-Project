@@ -1,0 +1,438 @@
+name: Tauri Windows CI
+
+on:
+  push:
+    branches:
+      - main
+      - feature/storage-improvements
+  pull_request:
+    paths:
+      - 'src-tauri/**'
+      - 'src/panther/sidecar/**'
+      - 'run_sidecar.py'
+      - 'build_sidecar.py'
+      - 'requirements.txt'
+      - '.github/workflows/tauri-windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tauri-windows-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-tauri:
+    name: Tauri 2 + React + Python Sidecar (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONPATH: src
+      CI: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ----------------------------------------------------------------------
+      # Node.js + frontend dependencies
+      # ----------------------------------------------------------------------
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: src-tauri/frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: src-tauri/frontend
+
+      # ----------------------------------------------------------------------
+      # Rust toolchain
+      # ----------------------------------------------------------------------
+      - name: Install stable Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      # ----------------------------------------------------------------------
+      # Python environment
+      # ----------------------------------------------------------------------
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest pytest-qt
+
+      # ----------------------------------------------------------------------
+      # Python: compile + sidecar tests
+      # ----------------------------------------------------------------------
+      - name: Compile Python sources
+        run: python -m compileall -q src run_sidecar.py build_sidecar.py
+
+      - name: Run sidecar unit tests
+        run: python -m pytest -q tests/test_sidecar_stage0.py tests/test_sidecar_adapters.py tests/test_sidecar_integration.py tests/test_sidecar_packaging.py tests/test_parent_watchdog.py
+        env:
+          PYTHONPATH: src
+          QT_QPA_PLATFORM: offscreen
+
+      # ----------------------------------------------------------------------
+      # Build sidecar executable via PyInstaller
+      # ----------------------------------------------------------------------
+      - name: Build sidecar executable
+        run: python build_sidecar.py --clean
+
+      - name: Verify sidecar executable exists and size
+        shell: pwsh
+        run: |
+          $exe = "src-tauri\binaries\panther-sidecar-x86_64-pc-windows-msvc.exe"
+          if (-not (Test-Path $exe)) {
+            throw "Expected sidecar executable was not produced: $exe"
+          }
+          $size = (Get-Item $exe).Length / 1MB
+          Write-Host "Sidecar executable size: $size MB"
+          if ($size -lt 5) {
+            throw "Sidecar executable is too small ($size MB), likely a build failure"
+          }
+
+      # ----------------------------------------------------------------------
+      # Packaged-binary smoke test (Windows, no Python on PATH)
+      # ----------------------------------------------------------------------
+      - name: Smoke test frozen sidecar (no Python on PATH)
+        shell: pwsh
+        run: |
+          $exe = "src-tauri\binaries\panther-sidecar-x86_64-pc-windows-msvc.exe"
+          $request = '{"jsonrpc":"2.0","id":"1","method":"system_monitor.get_cpu_percent","params":{}}'
+          Write-Host "Testing frozen sidecar: $exe"
+          Write-Host "Request: $request"
+
+          $psi = [System.Diagnostics.ProcessStartInfo]::new()
+          $psi.FileName = $exe
+          $psi.UseShellExecute = $false
+          $psi.RedirectStandardInput = $true
+          $psi.RedirectStandardOutput = $true
+          $psi.RedirectStandardError = $true
+          $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+          $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+          $p = [System.Diagnostics.Process]::Start($psi)
+          $p.StandardInput.WriteLine($request)
+          $p.StandardInput.Close()
+          $out = $p.StandardOutput.ReadToEnd()
+          $err = $p.StandardError.ReadToEnd()
+          if (-not $p.WaitForExit(60000)) { $p.Kill(); throw "sidecar smoke test timed out" }
+
+          Write-Host "Exit code: $($p.ExitCode)"
+          Write-Host "Stdout: $out"
+          if ($err) { Write-Host "Stderr: $err" }
+
+          if ($p.ExitCode -ne 0) {
+            throw "Sidecar process exited with code $($p.ExitCode)"
+          }
+          if (-not $out) {
+            throw "Sidecar produced no stdout output"
+          }
+          if ($out -notmatch '"jsonrpc"') {
+            throw "Sidecar stdout does not contain 'jsonrpc': $out"
+          }
+          if ($out -notmatch '"result"') {
+            throw "Sidecar stdout does not contain 'result': $out"
+          }
+
+          Write-Host "Smoke test PASSED"
+
+      # ----------------------------------------------------------------------
+      # Frontend: TypeScript check + production build
+      # ----------------------------------------------------------------------
+      - name: Frontend TypeScript check
+        run: npx tsc --noEmit
+        working-directory: src-tauri/frontend
+
+      - name: Frontend production build
+        run: npm run build
+        working-directory: src-tauri/frontend
+
+      # ----------------------------------------------------------------------
+      # Rust: cargo check + cargo test
+      # ----------------------------------------------------------------------
+      - name: Rust cargo check
+        run: cargo check
+        working-directory: src-tauri
+
+      - name: Rust cargo test
+        run: cargo test
+        working-directory: src-tauri
+
+      # ----------------------------------------------------------------------
+      # Tauri build (NSIS installer)
+      # ----------------------------------------------------------------------
+      - name: Build Tauri app (NSIS)
+        run: npx --yes @tauri-apps/cli@^2 build
+        env:
+          CI: true
+
+      - name: Verify NSIS installer exists
+        shell: pwsh
+        run: |
+          $installers = Get-ChildItem -Path "src-tauri\target\release\bundle\nsis" -Filter "*.exe" -ErrorAction SilentlyContinue
+          if (-not $installers) {
+            throw "NSIS installer not found in src-tauri\target\release\bundle\nsis"
+          }
+          foreach ($inst in $installers) {
+            Write-Host "Found installer: $($inst.FullName) ($($inst.Length / 1MB) MB)"
+          }
+
+      # ----------------------------------------------------------------------
+      # Build summary
+      # ----------------------------------------------------------------------
+      - name: Write build summary
+        if: always()
+        shell: pwsh
+        run: |
+          $summary = @"
+          branch: ${{ github.ref }}
+          commit: ${{ github.sha }}
+          python_version: $(python --version)
+          node_version: $(node --version)
+          npm_version: $(npm --version)
+          rust_version: $(rustc --version)
+          cargo_version: $(cargo --version)
+          "@
+          $summary | Out-File -FilePath "build-summary.txt" -Encoding utf8
+          # Append sidecar info
+          $sidecar = "src-tauri\binaries\panther-sidecar-x86_64-pc-windows-msvc.exe"
+          if (Test-Path $sidecar) {
+            $size = (Get-Item $sidecar).Length / 1MB
+            "sidecar_path: $sidecar" | Out-File -FilePath "build-summary.txt" -Encoding utf8 -Append
+            "sidecar_size_mb: $size" | Out-File -FilePath "build-summary.txt" -Encoding utf8 -Append
+          }
+          # Append installer info
+          $installers = Get-ChildItem -Path "src-tauri\target\release\bundle\nsis" -Filter "*.exe" -ErrorAction SilentlyContinue
+          if ($installers) {
+            foreach ($inst in $installers) {
+              $size = $inst.Length / 1MB
+              "installer_path: $($inst.FullName)" | Out-File -FilePath "build-summary.txt" -Encoding utf8 -Append
+              "installer_size_mb: $size" | Out-File -FilePath "build-summary.txt" -Encoding utf8 -Append
+            }
+          }
+          Write-Host "Build summary written"
+          Get-Content build-summary.txt
+
+      # ----------------------------------------------------------------------
+      # Upload artifacts
+      # ----------------------------------------------------------------------
+      - name: Upload NSIS installer
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: panther-nsis-installer
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload sidecar binary
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: panther-sidecar-binary
+          path: src-tauri/binaries/*.exe
+          retention-days: 7
+
+      - name: Upload build log summary
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-log-summary
+          path: build-summary.txt
+          retention-days: 7
+
+  installer-verify:
+    name: Verify NSIS Installer (Install + Launch + Orphan Check)
+    needs: windows-tauri
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Download NSIS installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: panther-nsis-installer
+          path: installer
+
+      - name: Silent install
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -Path "installer" -Filter "*.exe" | Select-Object -First 1
+          if (-not $installer) {
+            throw "No installer found in artifact"
+          }
+          Write-Host "Installing: $($installer.FullName)"
+          & $installer.FullName /S
+          Write-Host "Installer completed"
+
+      - name: Locate installed app and sidecar
+        shell: pwsh
+        run: |
+          # Fixed paths first
+          $appPaths = @(
+            "$env:LOCALAPPDATA\Panther System Intelligence\Panther System Intelligence.exe",
+            "$env:PROGRAMFILES\Panther System Intelligence\Panther System Intelligence.exe",
+            "$env:PROGRAMFILES(x86)\Panther System Intelligence\Panther System Intelligence.exe"
+          )
+          $appExe = $null
+          foreach ($p in $appPaths) {
+            if (Test-Path $p) {
+              $appExe = $p
+              break
+            }
+          }
+          # Recursive fallback search (max depth 5)
+          if (-not $appExe) {
+            $searchRoots = @($env:LOCALAPPDATA, $env:PROGRAMFILES)
+            if ($env:ProgramFiles(x86)) { $searchRoots += $env:ProgramFiles(x86) }
+            foreach ($root in $searchRoots) {
+              $found = Get-ChildItem -Path $root -Filter "Panther System Intelligence.exe" -Recurse -Depth 5 -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+              if ($found) {
+                $appExe = $found.FullName
+                break
+              }
+              $found = Get-ChildItem -Path $root -Filter "panther-tauri.exe" -Recurse -Depth 5 -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+              if ($found) {
+                $appExe = $found.FullName
+                break
+              }
+            }
+          }
+          if (-not $appExe) {
+            throw "Installed app executable not found. Checked fixed paths and recursive search."
+          }
+          Write-Host "Found app: $appExe"
+
+          # Tauri bundler strips the target triple at bundle time, so installed sidecar is panther-sidecar.exe
+          $sidecarExe = Join-Path (Split-Path $appExe) "panther-sidecar.exe"
+          if (-not (Test-Path $sidecarExe)) {
+            # Fallback: accept triple-suffixed name if present
+            $fallback = Join-Path (Split-Path $appExe) "panther-sidecar-x86_64-pc-windows-msvc.exe"
+            if (Test-Path $fallback) {
+              $sidecarExe = $fallback
+            } else {
+              throw "Bundled sidecar not found next to app (tried panther-sidecar.exe and triple-suffixed fallback)"
+            }
+          }
+          Write-Host "Found sidecar: $sidecarExe"
+
+          # Save for next steps
+          "APP_EXE=$appExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SIDECAR_EXE=$sidecarExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Graceful shutdown orphan check
+        shell: pwsh
+        run: |
+          $appExe = $env:APP_EXE
+          Write-Host "Launching app for graceful shutdown test: $appExe"
+          $proc = Start-Process -FilePath $appExe -PassThru
+          Write-Host "App process ID: $($proc.Id)"
+
+          # Wait for app to initialize
+          Start-Sleep -Seconds 15
+
+          # Verify app process is still running
+          $running = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
+          if (-not $running) {
+            throw "App process exited unexpectedly during graceful test"
+          }
+          Write-Host "App process is running"
+
+          # Graceful close
+          Write-Host "Requesting graceful close (CloseMainWindow)..."
+          $proc.CloseMainWindow()
+          $exited = $proc.WaitForExit(20000)
+          if (-not $exited) {
+            Write-Host "Graceful close timed out after 20s - forcing kill"
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            throw "Graceful close failed - app did not exit within 20s"
+          }
+          Write-Host "App exited gracefully"
+
+          # Wait for watchdog to reap sidecar
+          Start-Sleep -Seconds 3
+
+          # Check for any remaining sidecar processes (match both names)
+          $orphans = Get-Process -Name "panther-sidecar*" -ErrorAction SilentlyContinue
+          if ($orphans) {
+            Write-Host "ORPHANED sidecar processes found after graceful close:"
+            $orphans | ForEach-Object { Write-Host "  PID $($_.Id): $($_.Path)" }
+            throw "Orphaned sidecar processes detected after graceful app exit"
+          }
+          Write-Host "Graceful shutdown: no orphaned sidecar processes - PASSED"
+
+      - name: Forced kill orphan check
+        shell: pwsh
+        run: |
+          $appExe = $env:APP_EXE
+          Write-Host "Launching app for forced kill test: $appExe"
+          $proc = Start-Process -FilePath $appExe -PassThru
+          Write-Host "App process ID: $($proc.Id)"
+
+          # Wait for app to initialize
+          Start-Sleep -Seconds 15
+
+          # Verify app process is still running
+          $running = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
+          if (-not $running) {
+            throw "App process exited unexpectedly during forced kill test"
+          }
+          Write-Host "App process is running"
+
+          # Forced kill
+          Write-Host "Force killing app process..."
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+
+          # Wait for watchdog to reap sidecar (longer wait for forced kill)
+          Start-Sleep -Seconds 5
+
+          # Check for any remaining sidecar processes
+          $orphans = Get-Process -Name "panther-sidecar*" -ErrorAction SilentlyContinue
+          if ($orphans) {
+            Write-Host "ORPHANED sidecar processes found after forced kill:"
+            $orphans | ForEach-Object { Write-Host "  PID $($_.Id): $($_.Path)" }
+            throw "Orphaned sidecar processes detected after forced app kill"
+          }
+          Write-Host "Forced kill: no orphaned sidecar processes - PASSED"
+
+      - name: Run uninstaller
+        shell: pwsh
+        run: |
+          # Try to find and run the uninstaller
+          $uninstallPaths = @(
+            "$env:LOCALAPPDATA\Panther System Intelligence\uninstall.exe",
+            "$env:PROGRAMFILES\Panther System Intelligence\uninstall.exe",
+            "$env:PROGRAMFILES(x86)\Panther System Intelligence\uninstall.exe"
+          )
+          $uninstaller = $null
+          foreach ($p in $uninstallPaths) {
+            if (Test-Path $p) {
+              $uninstaller = $p
+              break
+            }
+          }
+          if ($uninstaller) {
+            Write-Host "Running uninstaller: $uninstaller"
+            & $uninstaller /S
+            Start-Sleep -Seconds 5
+            Write-Host "Uninstaller completed"
+          } else {
+            Write-Host "Uninstaller not found, skipping"
+          }

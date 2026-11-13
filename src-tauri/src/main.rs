@@ -1,6 +1,6 @@
 use crate::commands::metrics::invoke_metric;
 use crate::ipc::transport::{SidecarHandle, CHUNK_SIZE};
-use crate::ipc::{AppState, IpcState};
+use crate::ipc::{AppState, IpcState, SidecarRef};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -60,9 +60,11 @@ fn resolve_dev_src_dir() -> PathBuf {
 /// Uses `tauri::async_runtime::spawn` because window event callbacks run on
 /// the GTK main thread, outside any Tokio runtime context (`tokio::spawn`
 /// panics there).
-fn spawn_sidecar_cleanup(handle: Arc<SidecarHandle>, ipc_state: AppState) {
+fn spawn_sidecar_cleanup(handle: SidecarRef, ipc_state: AppState) {
     tauri::async_runtime::spawn(async move {
-        let _ = handle.kill().await;
+        if let Some(h) = &*handle.lock().await {
+            let _ = h.kill().await;
+        }
         ipc_state.lock().await.resolve_all_not_running();
     });
 }
@@ -71,6 +73,9 @@ fn spawn_dev_sidecar(src_dir: &str) -> SidecarHandle {
     let mut child = Command::new("python")
         .args(["-m", "panther.sidecar.server"])
         .env("PYTHONPATH", src_dir)
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONIOENCODING", "utf-8")
+        .env("PYTHONUNBUFFERED", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -114,12 +119,20 @@ fn main() {
                 .to_string_lossy()
                 .to_string();
 
-            let sidecar_handle: SidecarHandle = match app
+            // SidecarRef: Arc<Option<SidecarHandle>> — always managed, Some on success, None on failure.
+            let sidecar_ref: SidecarRef = Arc::new(Mutex::new(None));
+
+            let sidecar_result = app
                 .shell()
                 .sidecar("panther-sidecar")
-                .map(|cmd| cmd.env("PYTHONPATH", &src_dir))
-                .and_then(|cmd| cmd.spawn())
-            {
+                .map(|cmd| {
+                    cmd.env("PYTHONUTF8", "1")
+                        .env("PYTHONIOENCODING", "utf-8")
+                        .env("PYTHONUNBUFFERED", "1")
+                })
+                .and_then(|cmd| cmd.spawn());
+
+            let sidecar_handle: SidecarHandle = match sidecar_result {
                 Ok((events, child)) => SidecarHandle::Tauri(crate::ipc::transport::TauriSidecarHandle {
                     child: Arc::new(Mutex::new(Some(child))),
                     events: Arc::new(Mutex::new(Some(events))),
@@ -132,105 +145,128 @@ fn main() {
                         spawn_dev_sidecar(&src_dir)
                     } else {
                         eprintln!("[sidecar] failed to spawn bundled sidecar: {err}");
-                        return Err(format!("failed to spawn bundled sidecar: {err}").into());
+                        // In production, we still manage the ref as None so the app doesn't crash.
+                        // Commands will return an honest "not running" error.
+                        *sidecar_ref.lock().await = None;
+                        // Still manage IPC state and ref so the app starts.
+                        app.manage(ipc_state.clone());
+                        app.manage(sidecar_ref.clone());
+                        // Return Ok(()) so the app launches and surfaces the honest error via commands.
+                        return Ok(());
                     }
                 }
             };
 
-            // 3. Manage IPC state and sidecar handle (only after successful spawn).
+            // Store the successful handle in the ref
+            *sidecar_ref.lock().await = Some(sidecar_handle);
+
+            // 3. Manage IPC state and sidecar ref (always managed, even if sidecar is None).
             app.manage(ipc_state.clone());
-            let handle = Arc::new(sidecar_handle);
-            app.manage(handle.clone());
+            app.manage(sidecar_ref.clone());
 
             // 4. Read stderr diagnostics on a background task (source-agnostic).
-            match &*handle {
-                SidecarHandle::Tauri(_) => {
-                    // Stderr handled by the events consumer below.
-                }
-                SidecarHandle::Tokio(h) => {
-                    let stderr = h.stderr.clone();
-                    tokio::spawn(async move {
-                        let reader =
-                            tokio::io::BufReader::new(stderr.lock().await.take().expect("sidecar has no stderr"));
-                        let mut lines = reader.lines();
-                        while let Ok(Some(line)) = lines.next_line().await {
-                            eprintln!("[sidecar stderr] {line}");
+            let handle_for_stderr = sidecar_ref.clone();
+            tokio::spawn(async move {
+                let guard = handle_for_stderr.lock().await;
+                if let Some(handle) = guard.as_ref() {
+                    match handle {
+                        SidecarHandle::Tauri(_) => {
+                            // Stderr handled by the events consumer below.
                         }
-                    });
+                        SidecarHandle::Tokio(h) => {
+                            let stderr = h.stderr.clone();
+                            tokio::spawn(async move {
+                                let reader =
+                                    tokio::io::BufReader::new(stderr.lock().await.take().expect("sidecar has no stderr"));
+                                let mut lines = reader.lines();
+                                while let Ok(Some(line)) = lines.next_line().await {
+                                    eprintln!("[sidecar stderr] {line}");
+                                }
+                            });
+                        }
+                    }
                 }
-            }
+            });
 
             // 5. Spawn the single stdout reader task (source-agnostic byte parsing).
             let ipc_state_for_reader = ipc_state.clone();
-            match &*handle {
-                SidecarHandle::Tauri(h) => {
-                    let events = h.events.clone();
-                    let state = ipc_state_for_reader.clone();
-                    tokio::spawn(async move {
-                        let mut reader = crate::ipc::transport::SidecarReader::new(state);
-                        loop {
-                            let event = {
-                                let mut guard = events.lock().await;
-                                match guard.as_mut() {
-                                    Some(rx) => rx.recv().await,
-                                    None => None,
+            let handle_for_reader = sidecar_ref.clone();
+            tokio::spawn(async move {
+                let guard = handle_for_reader.lock().await;
+                if let Some(handle) = guard.as_ref() {
+                    match handle {
+                        SidecarHandle::Tauri(h) => {
+                            let events = h.events.clone();
+                            let state = ipc_state_for_reader.clone();
+                            tokio::spawn(async move {
+                                let mut reader = crate::ipc::transport::SidecarReader::new(state);
+                                loop {
+                                    let event = {
+                                        let mut guard = events.lock().await;
+                                        match guard.as_mut() {
+                                            Some(rx) => rx.recv().await,
+                                            None => None,
+                                        }
+                                    };
+                                    match event {
+                                        Some(CommandEvent::Stdout(payload)) => {
+                                            reader.feed_chunk(&payload).await;
+                                        }
+                                        Some(CommandEvent::Stderr(payload)) => {
+                                            eprintln!(
+                                                "[sidecar stderr] {}",
+                                                String::from_utf8_lossy(&payload)
+                                            );
+                                        }
+                                        Some(CommandEvent::Terminated(payload)) => {
+                                            eprintln!("[sidecar] exited with code {:?}, signal {:?}", payload.code, payload.signal);
+                                            // Take the child out of the handle so subsequent writes fail fast.
+                                            let _ = h.child.lock().await.take();
+                                            break;
+                                        }
+                                        Some(CommandEvent::Error(msg)) => {
+                                            eprintln!("[sidecar] error: {msg}");
+                                            break;
+                                        }
+                                        Some(_) => {
+                                            // Non-exhaustive enum catch-all
+                                            eprintln!("[sidecar] unexpected event");
+                                        }
+                                        None => break, // channel closed
+                                    }
                                 }
-                            };
-                            match event {
-                                Some(CommandEvent::Stdout(payload)) => {
-                                    reader.feed_chunk(&payload).await;
-                                }
-                                Some(CommandEvent::Stderr(payload)) => {
-                                    eprintln!(
-                                        "[sidecar stderr] {}",
-                                        String::from_utf8_lossy(&payload)
-                                    );
-                                }
-                                Some(CommandEvent::Terminated(payload)) => {
-                                    eprintln!("[sidecar] exited with code {:?}, signal {:?}", payload.code, payload.signal);
-                                    break;
-                                }
-                                Some(CommandEvent::Error(msg)) => {
-                                    eprintln!("[sidecar] error: {msg}");
-                                    break;
-                                }
-                                Some(_) => {
-                                    // Non-exhaustive enum catch-all
-                                    eprintln!("[sidecar] unexpected event");
-                                }
-                                None => break, // channel closed
-                            }
+                                reader.flush().await;
+                            });
                         }
-                        reader.flush().await;
-                    });
-                }
-                SidecarHandle::Tokio(h) => {
-                    let stdout = h.stdout.clone();
-                    let state = ipc_state_for_reader.clone();
-                    tokio::spawn(async move {
-                        let mut reader = crate::ipc::transport::SidecarReader::new(state);
-                        let stdout_handle =
-                            stdout.lock().await.take().expect("sidecar has no stdout");
-                        let mut stdout_reader = tokio::io::BufReader::new(stdout_handle);
-                        let mut buf = [0u8; CHUNK_SIZE];
-                        loop {
-                            let n = match stdout_reader.read(&mut buf).await {
-                                Ok(0) => break, // EOF
-                                Ok(n) => n,
-                                Err(e) => {
-                                    eprintln!("sidecar stdout read error: {e}");
-                                    break;
+                        SidecarHandle::Tokio(h) => {
+                            let stdout = h.stdout.clone();
+                            let state = ipc_state_for_reader.clone();
+                            tokio::spawn(async move {
+                                let mut reader = crate::ipc::transport::SidecarReader::new(state);
+                                let stdout_handle =
+                                    stdout.lock().await.take().expect("sidecar has no stdout");
+                                let mut stdout_reader = tokio::io::BufReader::new(stdout_handle);
+                                let mut buf = [0u8; CHUNK_SIZE];
+                                loop {
+                                    let n = match stdout_reader.read(&mut buf).await {
+                                        Ok(0) => break, // EOF
+                                        Ok(n) => n,
+                                        Err(e) => {
+                                            eprintln!("sidecar stdout read error: {e}");
+                                            break;
+                                        }
+                                    };
+                                    reader.feed_chunk(&buf[..n]).await;
                                 }
-                            };
-                            reader.feed_chunk(&buf[..n]).await;
+                                reader.flush().await;
+                            });
                         }
-                        reader.flush().await;
-                    });
+                    }
                 }
-            }
+            });
 
             // 6. Register shutdown handler: kill sidecar process and resolve pending IPC requests.
-            let handle_for_shutdown = handle.clone();
+            let handle_for_shutdown = sidecar_ref.clone();
             let ipc_state_for_shutdown = ipc_state.clone();
             let window = app
                 .get_webview_window("main")
@@ -251,7 +287,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ipc::SidecarError;
+    use crate::ipc::{SidecarError, SidecarRef};
 
     #[test]
     fn dev_src_dir_points_at_python_package_root() {
@@ -284,15 +320,8 @@ mod tests {
         let (_id2, rx2) = ipc.register();
         let state: AppState = Arc::new(Mutex::new(ipc));
 
-        // Build a sidecar handle with all Option fields None, so kill() is a no-op.
-        let handle = Arc::new(SidecarHandle::Tokio(
-            crate::ipc::transport::TokioSidecarHandle {
-                child: Arc::new(Mutex::new(None)),
-                stdin: Arc::new(Mutex::new(None)),
-                stdout: Arc::new(Mutex::new(None)),
-                stderr: Arc::new(Mutex::new(None)),
-            },
-        ));
+        // Build a SidecarRef with None (simulating sidecar not running).
+        let handle: SidecarRef = Arc::new(Mutex::new(None));
 
         // Call the cleanup function directly — this test fn has no #[tokio::test],
         // so there is NO Tokio runtime. This would panic with tokio::spawn.

@@ -3,11 +3,6 @@
 Reads newline-delimited JSON-RPC 2.0 requests from stdin, dispatches
 them to existing ``src/panther.services`` functions, and writes
 responses to stdout.  Diagnostics go exclusively to stderr.
-
-Stage 0 exposes only fast, pure read-only ``psutil`` metrics.  Service
-calls complete in well under a millisecond, so the synchronous reader
-loop remains responsive.  The Tauri gateway handles the async boundary
-by running stdio I/O on ``tokio::task::spawn_blocking``.
 """
 
 from __future__ import annotations
@@ -21,12 +16,21 @@ from .errors import (
     INVALID_PARAMS,
     METHOD_NOT_FOUND,
     PARSE_ERROR,
+    SERVICE_UNAVAILABLE,
     SidecarError,
     error_response,
     success_response,
 )
 from .methods import call_method, has_method, list_methods
 from .transport import FrameTooLargeError, log_diagnostic, read_line, write_message
+
+# Import UnsupportedPlatformError from the startup adapter where it's defined
+try:
+    from ..services.startup_adapter import UnsupportedPlatformError
+except ImportError:
+    # Fallback if the import fails for any reason
+    class UnsupportedPlatformError(RuntimeError):
+        pass
 
 # Shutdown flag set when the transport reports EOF or a fatal error.
 _SHUTDOWN = False
@@ -73,9 +77,29 @@ def _handle_request(raw: str) -> Optional[dict]:
     # 6. Call the method (may raise; caller catches)
     try:
         result = call_method(method, **(params or {}))
+    except UnsupportedPlatformError as exc:
+        # Platform-specific operations not supported on this OS
+        log_diagnostic(f"unsupported platform in {method}: {exc}")
+        return error_response(
+            SERVICE_UNAVAILABLE,
+            f"Unsupported on this platform: {exc}",
+            request_id,
+        )
+    except NotImplementedError as exc:
+        # Feature not implemented on this platform
+        log_diagnostic(f"not implemented in {method}: {exc}")
+        return error_response(
+            SERVICE_UNAVAILABLE,
+            f"Unsupported on this platform: {exc}",
+            request_id,
+        )
     except SidecarError as exc:
         log_diagnostic(f"sidecar error in {method}: {exc.message}")
         return error_response(exc.code, exc.message, request_id, exc.data)
+    except ValueError as exc:
+        # Validation errors from adapter functions (e.g., invalid threshold values)
+        log_diagnostic(f"invalid params in {method}: {exc}")
+        return error_response(INVALID_PARAMS, "Invalid params", request_id, {"detail": str(exc)})
     except Exception as exc:  # noqa: BLE001 - convert any service error to JSON-RPC
         log_diagnostic(f"internal error in {method}: {exc}")
         return error_response(INTERNAL_ERROR, "Internal error", request_id, {"detail": str(exc)})
@@ -90,6 +114,11 @@ def _handle_request(raw: str) -> Optional[dict]:
 def main() -> None:
     """Run the sidecar stdio JSON-RPC loop until stdin closes."""
     global _SHUTDOWN
+
+    # Configure stdio for UTF-8 safety on Windows (idempotent, cheap)
+    from .transport.stdio import configure_stdio
+
+    configure_stdio()
 
     log_diagnostic("panther sidecar starting")
     log_diagnostic(f"available methods: {', '.join(list_methods())}")

@@ -6,6 +6,7 @@ interface ThemeContextType {
   theme: Theme;
   setTheme: (theme: Theme) => void;
   resolvedTheme: "light" | "dark";
+  setCurrentScreen?: (screen: string) => void;
 }
 
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
@@ -19,8 +20,8 @@ export function useTheme() {
 }
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [theme, setTheme] = useState<Theme>("system");
-  const [resolvedTheme, setResolvedTheme] = useState<"light" | "dark">("light");
+  const [theme, setTheme] = useState<Theme>("dark");
+  const [resolvedTheme, setResolvedTheme] = useState<"light" | "dark">("dark");
 
   useEffect(() => {
     const root = window.document.documentElement;
@@ -29,11 +30,19 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
         const system = window.matchMedia("(prefers-color-scheme: dark)").matches
           ? "dark"
           : "light";
+        root.classList.toggle("dark", system === "dark");
         root.setAttribute("data-theme", system);
         return system;
       }
-      root.setAttribute("data-theme", t);
-      return t;
+      if (t === "dark") {
+        root.classList.add("dark");
+        root.setAttribute("data-theme", "dark");
+        return "dark";
+      }
+      // t === "light"
+      root.classList.remove("dark");
+      root.setAttribute("data-theme", "light");
+      return "light";
     };
 
     const resolved = resolve(theme);
