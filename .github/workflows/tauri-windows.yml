@@ -73,7 +73,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-          python -m pip install pytest pytest-qt
+          python -m pip install pytest pytest-qt pytest-timeout
 
       # ----------------------------------------------------------------------
       # Python: compile + sidecar tests
@@ -81,8 +81,39 @@ jobs:
       - name: Compile Python sources
         run: python -m compileall -q src run_sidecar.py build_sidecar.py
 
-      - name: Run sidecar unit tests
-        run: python -m pytest -q tests/test_sidecar_stage0.py tests/test_sidecar_adapters.py tests/test_sidecar_integration.py tests/test_sidecar_packaging.py tests/test_parent_watchdog.py
+      # Each file runs separately with a hard per-test timeout so a hang in one
+      # suite fails fast and reports the exact test + stack instead of burning
+      # the whole job timeout. faulthandler output is captured in the step log.
+      - name: Sidecar tests (stage0)
+        run: python -m pytest -q --timeout=120 --timeout-method=thread tests/test_sidecar_stage0.py
+        env:
+          PYTHONPATH: src
+          QT_QPA_PLATFORM: offscreen
+
+      - name: Sidecar tests (adapters)
+        if: always()
+        run: python -m pytest -q --timeout=120 --timeout-method=thread tests/test_sidecar_adapters.py
+        env:
+          PYTHONPATH: src
+          QT_QPA_PLATFORM: offscreen
+
+      - name: Sidecar tests (integration)
+        if: always()
+        run: python -m pytest -q --timeout=120 --timeout-method=thread tests/test_sidecar_integration.py
+        env:
+          PYTHONPATH: src
+          QT_QPA_PLATFORM: offscreen
+
+      - name: Sidecar tests (packaging)
+        if: always()
+        run: python -m pytest -q --timeout=120 --timeout-method=thread tests/test_sidecar_packaging.py
+        env:
+          PYTHONPATH: src
+          QT_QPA_PLATFORM: offscreen
+
+      - name: Sidecar tests (parent watchdog)
+        if: always()
+        run: python -m pytest -q --timeout=120 --timeout-method=thread tests/test_parent_watchdog.py
         env:
           PYTHONPATH: src
           QT_QPA_PLATFORM: offscreen

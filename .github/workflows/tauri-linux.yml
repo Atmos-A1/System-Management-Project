@@ -107,6 +107,22 @@ jobs:
         run: python -m pytest -q tests/test_sidecar_stage0.py
 
       # ----------------------------------------------------------------------
+      # Build the Linux sidecar artifact required by Tauri's externalBin.
+      # `tauri.conf.json` declares `binaries/panther-sidecar`, so the target
+      # triple-suffixed binary must exist before cargo check runs the build
+      # script. Without it the build fails with:
+      #   resource path `binaries/panther-sidecar-x86_64-unknown-linux-gnu`
+      #   doesn't exist
+      # ----------------------------------------------------------------------
+      - name: Build Linux sidecar for externalBin
+        run: python build_sidecar.py --clean
+
+      - name: Verify Linux sidecar artifact
+        run: |
+          test -f src-tauri/binaries/panther-sidecar-x86_64-unknown-linux-gnu
+          ls -lh src-tauri/binaries/
+
+      # ----------------------------------------------------------------------
       # Rust: cargo check then cargo build
       # ----------------------------------------------------------------------
       - name: Rust cargo check
