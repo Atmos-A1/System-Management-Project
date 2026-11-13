@@ -87,7 +87,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-          python -m pip install pytest pytest-qt
+          python -m pip install pytest pytest-qt pytest-timeout
 
       # ----------------------------------------------------------------------
       # Frontend: TypeScript check + production build
@@ -104,7 +104,7 @@ jobs:
       # Python Stage 0 sidecar tests
       # ----------------------------------------------------------------------
       - name: Run Stage 0 sidecar tests
-        run: python -m pytest -q tests/test_sidecar_stage0.py
+        run: python -m pytest -q tests/test_sidecar_stage0.py --timeout=120 --timeout-method=thread
 
       # ----------------------------------------------------------------------
       # Build the Linux sidecar artifact required by Tauri's externalBin.

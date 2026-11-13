@@ -73,6 +73,7 @@ fn spawn_dev_sidecar(src_dir: &str) -> SidecarHandle {
     let mut child = Command::new("python")
         .args(["-m", "panther.sidecar.server"])
         .env("PYTHONPATH", src_dir)
+        .env("PANTHER_PARENT_PID", std::process::id().to_string())
         .env("PYTHONUTF8", "1")
         .env("PYTHONIOENCODING", "utf-8")
         .env("PYTHONUNBUFFERED", "1")
@@ -126,7 +127,15 @@ fn main() {
                 .shell()
                 .sidecar("panther-sidecar")
                 .map(|cmd| {
-                    cmd.env("PYTHONUTF8", "1")
+                    // The frozen sidecar is a PyInstaller onefile executable:
+                    // a level-1 bootloader plus a level-2 child hosting the
+                    // interpreter. Killing only the direct child leaves the
+                    // grandchild running. `set_process_group` puts the whole
+                    // tree in a job object (Windows) / process group (POSIX)
+                    // so `send_kill()` terminates all of it.
+                    cmd.set_process_group(true)
+                        .env("PANTHER_PARENT_PID", std::process::id().to_string())
+                        .env("PYTHONUTF8", "1")
                         .env("PYTHONIOENCODING", "utf-8")
                         .env("PYTHONUNBUFFERED", "1")
                 })

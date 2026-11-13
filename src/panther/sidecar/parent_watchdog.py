@@ -80,16 +80,64 @@ def _watchdog_loop(
         sleep(min(interval, 0.5))
 
 
+def resolve_watched_pid(
+    explicit_pid: Optional[int],
+    getppid: Callable[[], int],
+) -> Optional[int]:
+    """Choose which PID the watchdog should watch.
+
+    A PyInstaller `--onefile` executable is actually a two-level process tree:
+    the level-1 bootloader (the process Tauri spawns) unpacks to a temporary
+    directory and starts the level-2 bootloader, which hosts the Python
+    interpreter. `os.getppid()` inside the Python code therefore returns the
+    *level-1 bootloader*, not the Tauri app.
+
+    That makes `os.getppid()` insufficient when the Tauri app is force-killed
+    without cascading termination: the level-1 bootloader survives, the
+    watchdog still sees its parent as alive, and the sidecar is orphaned.
+
+    When the caller supplies the real owner PID (Tauri passes its own PID via
+    `PANTHER_PARENT_PID`), prefer it. Otherwise fall back to `os.getppid()`.
+
+    Args:
+        explicit_pid: The owner PID supplied by the launcher, if any.
+        getppid: Callable returning the OS parent PID (typically `os.getppid`).
+
+    Returns:
+        The PID to watch, or None if no usable PID could be determined.
+    """
+    if explicit_pid is not None:
+        try:
+            candidate = int(explicit_pid)
+        except (TypeError, ValueError):
+            candidate = 0
+        if candidate > 1:
+            return candidate
+        # An explicit-but-invalid PID is a launcher bug. Fall through to the
+        # OS parent rather than disabling the watchdog entirely.
+
+    try:
+        ppid = int(getppid())
+    except Exception:
+        return None
+
+    return ppid if ppid > 1 else None
+
+
 def start_parent_watchdog(
     interval: float = 2.0,
     *,
     on_parent_gone: Optional[Callable[[], None]] = None,
+    parent_pid: Optional[int] = None,
 ) -> threading.Thread | None:
-    """Start a daemon thread that exits the process when the parent disappears.
+    """Start a daemon thread that exits the process when the owner disappears.
 
     Args:
         interval: Polling interval in seconds. If <= 0, the watchdog is not started.
         on_parent_gone: Callback when parent dies. Defaults to `os._exit(0)`.
+        parent_pid: PID of the owning process (the Tauri app), when known.
+            Preferred over `os.getppid()` because a frozen onefile sidecar's OS
+            parent is the PyInstaller bootloader, not the app that spawned it.
 
     Returns:
         The started thread, or None if not started (interval <= 0 or error).
@@ -103,13 +151,11 @@ def start_parent_watchdog(
         # psutil not available — cannot run watchdog
         return None
 
-    # Capture parent PID once at startup
-    try:
-        parent_pid = os.getppid()
-    except Exception:
-        return None
+    # Capture parent PID once at startup. An explicit owner PID wins over the
+    # OS parent for the reasons documented in `resolve_watched_pid`.
+    parent_pid = resolve_watched_pid(parent_pid, os.getppid)
 
-    if parent_pid <= 1:
+    if parent_pid is None:
         return None
 
     if on_parent_gone is None:

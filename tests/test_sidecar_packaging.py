@@ -358,11 +358,122 @@ def test_windows_workflow_uploads_build_summary():
     assert "if: always()" in content
 
 
-def test_windows_workflow_installer_upload_if_no_files_found_error():
-    """tauri-windows.yml installer upload has if-no-files-found: error."""
+def test_windows_workflow_installer_upload_missing_artifact_policy():
+    """The NSIS upload runs under `always()` so a missing artifact must warn.
+
+    The upload step executes even when an earlier build step failed, in which
+    case no installer exists. Failing the upload there would report a second,
+    misleading error and obscure the real root cause, so the policy is `warn`.
+    The installer is never silently dropped: `installer-verify` depends on the
+    build job and is skipped when the bundle was not produced.
+    """
     workflow = REPO_ROOT / ".github/workflows/tauri-windows.yml"
     content = workflow.read_text()
-    assert "if-no-files-found: error" in content
+
+    # Locate the installer upload step and inspect only its own config.
+    marker = "name: Upload NSIS installer"
+    assert marker in content, "installer upload step is missing"
+    step = content.split(marker, 1)[1]
+    # Stop at the next top-level step definition.
+    step = step.split("\n      - name:", 1)[0]
+
+    assert "if-no-files-found: warn" in step, (
+        "installer upload under `if: always()` must warn on a missing artifact, "
+        "not fail with a misleading second error"
+    )
+    assert "if-no-files-found: error" not in step
+
+
+def test_windows_workflow_installer_upload_gated_by_build():
+    """installer-verify runs only when the build job succeeded."""
+    workflow = REPO_ROOT / ".github/workflows/tauri-windows.yml"
+    content = workflow.read_text()
+    assert "needs: windows-tauri" in content
+
+
+def test_windows_workflow_silent_install_waits():
+    """Silent install must block until the installer exits and check its code.
+
+    PowerShell's call operator does not wait for GUI-subsystem executables, so
+    the install would race the discovery step and a failed install would be
+    silently swallowed.
+    """
+    workflow = REPO_ROOT / ".github/workflows/tauri-windows.yml"
+    content = workflow.read_text()
+
+    marker = "name: Silent install"
+    assert marker in content
+    step = content.split(marker, 1)[1].split("\n      - name:", 1)[0]
+
+    assert "Start-Process" in step
+    assert "-Wait" in step
+    assert "-PassThru" in step
+    assert "ExitCode" in step
+    # The non-waiting form must not be used to launch the installer.
+    assert "& $installer.FullName /S" not in step
+
+
+def test_windows_workflow_no_invalid_programfiles_x86_token():
+    """`$env:ProgramFiles(x86)` is invalid PowerShell and must not be used."""
+    workflow = REPO_ROOT / ".github/workflows/tauri-windows.yml"
+    lines = workflow.read_text().splitlines()
+
+    # Ignore comments: explanatory notes legitimately quote the bad token.
+    offenders = [
+        (i, line)
+        for i, line in enumerate(lines, 1)
+        if ("$env:ProgramFiles(x86)" in line or "$env:PROGRAMFILES(x86)" in line)
+        and not line.lstrip().startswith("#")
+    ]
+    assert not offenders, f"invalid PowerShell env token used at lines: {offenders}"
+    assert '[System.Environment]::GetEnvironmentVariable("ProgramFiles(x86)")' in "\n".join(lines)
+
+
+def test_windows_workflow_pins_tauri_cli():
+    """The Tauri CLI must be pinned, not a floating `@^2` range."""
+    workflow = REPO_ROOT / ".github/workflows/tauri-windows.yml"
+    content = workflow.read_text()
+    assert "@tauri-apps/cli@^2" not in content
+    assert "@tauri-apps/cli@2." in content
+
+
+def test_rust_passes_owner_pid_to_sidecar():
+    """Tauri exports its own PID so the watchdog can detect a force-kill.
+
+    A frozen onefile sidecar's OS parent is the PyInstaller bootloader, not the
+    Tauri app, so watching `os.getppid()` alone cannot see the app disappear.
+    """
+    main_rs = REPO_ROOT / "src-tauri/src/main.rs"
+    content = main_rs.read_text()
+    assert content.count('env("PANTHER_PARENT_PID"') == 2, (
+        "both the bundled and dev sidecar spawn paths must set PANTHER_PARENT_PID"
+    )
+
+
+def test_rust_kills_whole_sidecar_process_tree():
+    """The bundled sidecar must spawn into a process group / job object.
+
+    A PyInstaller onefile executable is a bootloader plus a grandchild hosting
+    the interpreter. Without `set_process_group(true)` the plugin's kill path
+    falls back to `Child::kill()`, which terminates only the direct child and
+    leaves the grandchild orphaned.
+    """
+    main_rs = REPO_ROOT / "src-tauri/src/main.rs"
+    content = main_rs.read_text()
+    assert "set_process_group(true)" in content
+
+
+def test_ci_workflow_runs_full_suite():
+    """ci.yml must run the whole tests/ directory, not only selected files.
+
+    Per-file steps were added for timeout isolation; a catch-all step is needed
+    so storage/UI/process suites are still executed.
+    """
+    workflow = REPO_ROOT / ".github/workflows/ci.yml"
+    content = workflow.read_text()
+    assert 'run: python -m pytest -q -ra' in content
+    assert "tests/\n" in content or "tests/ --" in content or "tests/ " in content
+    assert "--ignore=tests/test_sidecar_stage0.py" in content
 
 
 # ---------------------------------------------------------------------------

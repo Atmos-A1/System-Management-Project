@@ -12,6 +12,7 @@ sys.path.insert(0, str(__file__.replace("tests/test_parent_watchdog.py", "src"))
 
 from panther.sidecar.parent_watchdog import (
     parent_is_gone,
+    resolve_watched_pid,
     should_terminate,
     _watchdog_loop,
     start_parent_watchdog,
@@ -140,13 +141,25 @@ def test_watchdog_loop_never_terminates_when_parent_alive():
     def counting_is_alive(_pid):
         nonlocal call_count
         call_count += 1
-        # Return True forever (parent stays alive); cap at 3 calls for test brevity
+        # Return True for first 3 calls, then raise a private sentinel from
+        # the *injected sleep function* (not from is_alive) to break the loop.
+        # This avoids the broad `except Exception` in parent_is_gone swallowing
+        # StopIteration and causing an infinite loop.
         if call_count > 3:
-            raise StopIteration("test limit exceeded")
+            raise _StopLoop
         return True
 
+    class _StopLoop(Exception):
+        """Private sentinel raised from sleep to terminate the test loop."""
+        pass
+
     mock_on_parent_gone = MagicMock()
-    mock_sleep = MagicMock()
+
+    def sleep_that_stops(_interval):
+        if call_count > 3:
+            raise _StopLoop
+
+    mock_sleep = MagicMock(side_effect=sleep_that_stops)
 
     # Run the loop; it should keep iterating since parent is "alive"
     # and parent_pid=12345 > 1, so parent_is_gone returns False (safe default).
@@ -158,8 +171,8 @@ def test_watchdog_loop_never_terminates_when_parent_alive():
             on_parent_gone=mock_on_parent_gone,
             sleep=mock_sleep,
         )
-    except StopIteration:
-        # StopIteration may fire after the 4th call (our cap); that's fine.
+    except _StopLoop:
+        # Expected termination via sleep sentinel
         pass
 
     # is_alive was called at least 3 times (once per loop iteration before exit)
@@ -295,9 +308,98 @@ def test_start_parent_watchdog_custom_on_parent_gone():
         thread = start_parent_watchdog(interval=0.1, on_parent_gone=mock_on_parent_gone)
         assert thread is not None
 
-        # Capture the target function passed to Thread
-        target = mock_start.call_args[0][0] if mock_start.call_args else None
+        # Thread.start() takes no positional args, so inspect the thread's
+        # target instead of indexing call_args.
+        assert thread.daemon is True
+        assert thread.name == "panther-parent-watchdog"
+        target = thread._target
         assert target is not None
+
+        # The custom callback must be the one wired into the loop. Invoke the
+        # captured runner with a parent that is already gone and assert the
+        # injected callback fires instead of os._exit.
+        with patch("os.getppid", return_value=99999), patch(
+            "psutil.pid_exists", return_value=False
+        ):
+            target()
+
+        mock_on_parent_gone.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# resolve_watched_pid tests
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_watched_pid_prefers_explicit_pid():
+    """An explicit owner PID wins over the OS parent.
+
+    Regression guard: a frozen onefile sidecar's OS parent is the PyInstaller
+    bootloader, so watching `os.getppid()` misses a force-killed Tauri app.
+    """
+    assert resolve_watched_pid(4242, lambda: 777) == 4242
+
+
+def test_resolve_watched_pid_falls_back_to_getppid():
+    """Without an explicit PID, the OS parent is used."""
+    assert resolve_watched_pid(None, lambda: 555) == 555
+
+
+def test_resolve_watched_pid_rejects_invalid_explicit_pid():
+    """A non-positive or unparsable explicit PID falls back to the OS parent."""
+    assert resolve_watched_pid(0, lambda: 555) == 555
+    assert resolve_watched_pid(1, lambda: 555) == 555
+    assert resolve_watched_pid(-9, lambda: 555) == 555
+    assert resolve_watched_pid("not-a-pid", lambda: 555) == 555
+
+
+def test_resolve_watched_pid_accepts_numeric_string():
+    """A numeric string PID (as read from an env var) is accepted."""
+    assert resolve_watched_pid("8080", lambda: 1) == 8080
+
+
+def test_resolve_watched_pid_returns_none_when_unusable():
+    """No explicit PID and an unusable OS parent yields None (no watchdog)."""
+    assert resolve_watched_pid(None, lambda: 0) is None
+    assert resolve_watched_pid(None, lambda: 1) is None
+
+
+def test_resolve_watched_pid_getppid_exception_returns_none():
+    """A raising getppid must not propagate."""
+
+    def _boom() -> int:
+        raise OSError("no such process")
+
+    assert resolve_watched_pid(None, _boom) is None
+
+
+def test_start_parent_watchdog_uses_explicit_pid():
+    """The started thread watches the explicit owner PID, not os.getppid()."""
+    captured = {}
+
+    def _fake_loop(parent_pid, interval, is_alive, on_parent_gone, sleep):
+        captured["pid"] = parent_pid
+        raise _StopThread
+
+    class _StopThread(Exception):
+        pass
+
+    with patch("os.getppid", return_value=777), patch(
+        "psutil.pid_exists", return_value=True
+    ), patch(
+        "panther.sidecar.parent_watchdog._watchdog_loop", side_effect=_fake_loop
+    ), patch("threading.Thread.start"):
+        thread = start_parent_watchdog(interval=0.1, parent_pid=4242)
+        assert thread is not None
+
+        # Run the thread body directly; the loop raises to stop after capture.
+        try:
+            thread._target()
+        except _StopThread:
+            pass
+
+    # The PID must come from the explicit argument, not os.getppid() (= 777).
+    assert captured["pid"] == 4242
 
 
 # ---------------------------------------------------------------------------

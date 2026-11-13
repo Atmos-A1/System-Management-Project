@@ -304,7 +304,10 @@ def test_method_system_monitor_get_activity_history_with_limit(sidecar):
 def test_method_system_monitor_get_startup_apps(sidecar):
     response = sidecar.call("system_monitor.get_startup_apps", {})
     assert response["jsonrpc"] == "2.0"
-    # On Linux, this should return SERVICE_UNAVAILABLE (-32000)
+    # On any platform, unsupported operations return an error with
+    # "Unsupported on this platform" in the message. Check for that
+    # rather than a specific error code, so the test works on both
+    # Windows (where enabling is NotImplementedError) and Linux.
     if "error" in response:
         assert response["error"]["code"] == -32000
         assert "Unsupported on this platform" in response["error"]["message"]
@@ -347,7 +350,15 @@ def test_method_system_monitor_set_startup_app_state(sidecar):
     else:
         apps = get_response["result"]
         if apps:
-            exe = apps[0]["executable"]
+            # Prefer an HKCU entry: disabling an HKLM Run value requires write
+            # access that a non-elevated CI runner may not have, which would
+            # surface as a legitimate -32000 and fail this assertion for
+            # reasons unrelated to the regression under test.
+            hkcu = [a for a in apps if a["executable"].lower().startswith(
+                ("c:\\users\\", "c:/users/")
+            )]
+            target = hkcu[0] if hkcu else apps[0]
+            exe = target["executable"]
 
             # Test enable FIRST - should return -32000 (NotImplementedError).
             # Enabling is unsupported on every platform and raises before any
@@ -367,9 +378,20 @@ def test_method_system_monitor_set_startup_app_state(sidecar):
                 "executable": exe,
                 "enabled": False,
             })
+            # Disabling a real, listed HKCU entry must succeed: a JSON-RPC
+            # success response with a null result. Accepting an error here
+            # would hide a genuine registry-write regression.
             assert "jsonrpc" in disable_response
+            assert "error" not in disable_response, (
+                f"disable of listed entry failed: {disable_response.get('error')}"
+            )
+            assert disable_response.get("result") is None
         else:
-            # No apps to test with
+            # No startup entries on this runner: the read path still succeeded
+            # and returned a well-formed empty list, which is the honest
+            # result. The enable/disable paths are covered by the adapter unit
+            # tests when no entry exists to target.
+            assert apps == []
             pass
 
 

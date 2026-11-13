@@ -26,6 +26,16 @@ class UnsupportedPlatformError(RuntimeError):
     """Raised when a Windows-only registry operation is unavailable."""
 
 
+class RegistryOperationError(RuntimeError):
+    """Raised when a registry read/write operation fails (e.g., permission, missing key, corruption).
+
+    This is distinct from UnsupportedPlatformError: the platform *is* Windows and the
+    registry *is* available, but a specific hive/value operation failed. Callers should
+    treat this as a service-level failure (SERVICE_UNAVAILABLE / -32000), not an
+    internal server error.
+    """
+
+
 _RUN_KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 if winreg is not None:
@@ -48,13 +58,17 @@ def _require_registry() -> None:
 
 
 def _open_key(root, subkey, access=None):
+    """Open a registry key, propagating OS-level failures unchanged.
+
+    Callers decide how to handle a per-scope failure: `get_startup_entries`
+    treats one scope's absence as non-fatal, while `set_entry_enabled` wraps
+    the error in `RegistryOperationError`.
+    """
     _require_registry()
     if access is None:
         access = winreg.KEY_READ
-    try:
-        return winreg.OpenKey(root, subkey, 0, access)
-    except PermissionError as e:
-        raise PermissionError(f"Cannot open registry key {subkey!r}: {e}")
+    return winreg.OpenKey(root, subkey, 0, access)
+
 
 def get_startup_entries() -> List[Dict[str, Any]]:
     """Return a list of startup entries.
@@ -87,7 +101,9 @@ def get_startup_entries() -> List[Dict[str, Any]]:
                         i += 1
                     except OSError:
                         break
-        except PermissionError:
+        except OSError:
+            # Per-scope registry access errors are expected and non-fatal by design
+            # (docstring: "Errors reading a hive are ignored"). Continue to next scope.
             continue
     return entries
 
@@ -101,6 +117,7 @@ def set_entry_enabled(name: str, scope: str, enable: bool) -> None:
 
     Raises :class:`UnsupportedPlatformError` when the Windows registry is not
     available.
+    Raises :class:`RegistryOperationError` when a registry read/write operation fails.
     """
     _require_registry()
     root, subkey = None, None
@@ -112,14 +129,19 @@ def set_entry_enabled(name: str, scope: str, enable: bool) -> None:
         raise ValueError(f"Unknown scope {scope!r}")
 
     access = winreg.KEY_WRITE
-    with _open_key(root, subkey, access) as key:
-        if enable:
-            raise NotImplementedError(
-                "Enabling a disabled entry requires the original command – "
-                "callers should store the command before deletion."
-            )
-        else:
-            try:
-                winreg.DeleteValue(key, name)
-            except FileNotFoundError:
-                pass
+    try:
+        with _open_key(root, subkey, access) as key:
+            if enable:
+                raise NotImplementedError(
+                    "Enabling a disabled entry requires the original command – "
+                    "callers should store the command before deletion."
+                )
+            else:
+                try:
+                    winreg.DeleteValue(key, name)
+                except FileNotFoundError:
+                    pass
+    except OSError as e:
+        # Wrap all OS-level registry write failures (permission, missing key, etc.)
+        # in a semantically clear exception for the server to map to SERVICE_UNAVAILABLE.
+        raise RegistryOperationError(f"Registry operation failed for {scope}\\{name}: {e}") from e

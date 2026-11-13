@@ -24,12 +24,14 @@ from .errors import (
 from .methods import call_method, has_method, list_methods
 from .transport import FrameTooLargeError, log_diagnostic, read_line, write_message
 
-# Import UnsupportedPlatformError from the startup adapter where it's defined
+# Import UnsupportedPlatformError and RegistryOperationError from the startup adapter where they're defined
 try:
-    from ..services.startup_adapter import UnsupportedPlatformError
+    from ..services.startup_adapter import UnsupportedPlatformError, RegistryOperationError
 except ImportError:
     # Fallback if the import fails for any reason
     class UnsupportedPlatformError(RuntimeError):
+        pass
+    class RegistryOperationError(RuntimeError):
         pass
 
 # Shutdown flag set when the transport reports EOF or a fatal error.
@@ -83,6 +85,14 @@ def _handle_request(raw: str) -> Optional[dict]:
         return error_response(
             SERVICE_UNAVAILABLE,
             f"Unsupported on this platform: {exc}",
+            request_id,
+        )
+    except RegistryOperationError as exc:
+        # Registry read/write failed on a supported platform (e.g., permission, missing hive)
+        log_diagnostic(f"registry operation failed in {method}: {exc}")
+        return error_response(
+            SERVICE_UNAVAILABLE,
+            f"Registry operation failed: {exc}",
             request_id,
         )
     except NotImplementedError as exc:

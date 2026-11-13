@@ -155,3 +155,104 @@ def test_set_entry_enabled_reports_unsupported_without_winreg(
 
     with pytest.raises(module.UnsupportedPlatformError):
         module.set_entry_enabled("MyApp", "HKCU", False)
+
+
+def test_get_startup_entries_continues_on_per_scope_oserror(monkeypatch):
+    """One scope raising FileNotFoundError/OSError still yields entries from the other scope."""
+    fake = types.SimpleNamespace()
+    fake.HKEY_CURRENT_USER = 0x80000001
+    fake.HKEY_LOCAL_MACHINE = 0x80000002
+    fake.KEY_READ = 0x20019
+    fake.KEY_WRITE = 0x20006
+
+    hkcu_key = _make_fake_key([("UserApp", r"C:\User\app.exe")])
+
+    def OpenKey(root, subkey, reserved=0, access=0):
+        if root == fake.HKEY_CURRENT_USER:
+            return hkcu_key
+        # Simulate HKLM key missing (FileNotFoundError) or other OSError
+        raise FileNotFoundError("HKLM Run key not found")
+
+    fake.OpenKey = OpenKey
+    fake.EnumValue = lambda key, i: key.EnumValue(i)
+    fake.DeleteValue = lambda key, name: None
+
+    monkeypatch.setitem(sys.modules, "winreg", fake)
+    monkeypatch.delitem(sys.modules, _ADAPTER_MODULE, raising=False)
+    try:
+        from panther.services.startup_adapter import get_startup_entries
+
+        entries = get_startup_entries()
+    finally:
+        sys.modules.pop(_ADAPTER_MODULE, None)
+
+    # Should get HKCU entry, not crash on HKLM failure
+    assert len(entries) == 1
+    assert entries[0]["name"] == "UserApp"
+    assert entries[0]["scope"] == "HKCU"
+
+
+def test_get_startup_entries_continues_on_plain_oserror(monkeypatch):
+    """One scope raising plain OSError (not PermissionError/FileNotFoundError) still yields other scope."""
+    fake = types.SimpleNamespace()
+    fake.HKEY_CURRENT_USER = 0x80000001
+    fake.HKEY_LOCAL_MACHINE = 0x80000002
+    fake.KEY_READ = 0x20019
+    fake.KEY_WRITE = 0x20006
+
+    hkcu_key = _make_fake_key([("UserApp", r"C:\User\app.exe")])
+
+    def OpenKey(root, subkey, reserved=0, access=0):
+        if root == fake.HKEY_CURRENT_USER:
+            return hkcu_key
+        # Simulate a generic OSError (e.g., corruption, winerror 5, etc.)
+        raise OSError("Generic registry error")
+
+    fake.OpenKey = OpenKey
+    fake.EnumValue = lambda key, i: key.EnumValue(i)
+    fake.DeleteValue = lambda key, name: None
+
+    monkeypatch.setitem(sys.modules, "winreg", fake)
+    monkeypatch.delitem(sys.modules, _ADAPTER_MODULE, raising=False)
+    try:
+        from panther.services.startup_adapter import get_startup_entries
+
+        entries = get_startup_entries()
+    finally:
+        sys.modules.pop(_ADAPTER_MODULE, None)
+
+    assert len(entries) == 1
+    assert entries[0]["name"] == "UserApp"
+    assert entries[0]["scope"] == "HKCU"
+
+
+def test_set_entry_enabled_wraps_oserror_in_registryoperationerror(monkeypatch):
+    """set_entry_enabled wraps OSError in RegistryOperationError for service-level mapping."""
+    fake = types.SimpleNamespace()
+    fake.HKEY_CURRENT_USER = 0x80000001
+    fake.HKEY_LOCAL_MACHINE = 0x80000002
+    fake.KEY_READ = 0x20019
+    fake.KEY_WRITE = 0x20006
+
+    hkcu_key = _make_fake_key([])
+
+    def OpenKey(root, subkey, reserved=0, access=0):
+        if root == fake.HKEY_CURRENT_USER and access == fake.KEY_WRITE:
+            raise PermissionError("Access denied for write")
+        return hkcu_key
+
+    fake.OpenKey = OpenKey
+    fake.EnumValue = lambda key, i: key.EnumValue(i)
+    fake.DeleteValue = lambda key, name: None
+
+    monkeypatch.setitem(sys.modules, "winreg", fake)
+    monkeypatch.delitem(sys.modules, _ADAPTER_MODULE, raising=False)
+    try:
+        from panther.services.startup_adapter import set_entry_enabled, RegistryOperationError
+
+        with pytest.raises(RegistryOperationError) as exc_info:
+            set_entry_enabled("MyApp", "HKCU", False)
+        # Verify the original OSError is chained
+        assert isinstance(exc_info.value.__cause__, PermissionError)
+    finally:
+        sys.modules.pop(_ADAPTER_MODULE, None)

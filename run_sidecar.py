@@ -8,6 +8,7 @@ starts the parent watchdog when frozen, and delegates to the server main().
 
 from __future__ import annotations
 
+import os
 import sys
 import traceback
 from pathlib import Path
@@ -35,6 +36,28 @@ def configure_stdio() -> None:
     _configure_stdio()
 
 
+def _read_parent_pid_env() -> int | None:
+    """Read the owning process PID supplied by the launcher.
+
+    Tauri sets `PANTHER_PARENT_PID` to its own PID. This matters because a
+    frozen onefile sidecar's `os.getppid()` returns the PyInstaller bootloader
+    rather than the app, so watching the OS parent alone cannot detect the app
+    being force-killed.
+
+    Returns None when the variable is absent or not a positive integer.
+    """
+    raw = os.environ.get("PANTHER_PARENT_PID")
+    if not raw:
+        return None
+
+    try:
+        pid = int(raw.strip())
+    except (TypeError, ValueError):
+        return None
+
+    return pid if pid > 1 else None
+
+
 def _start_parent_watchdog_if_frozen() -> None:
     """Start the parent watchdog thread when running as a frozen PyInstaller executable.
 
@@ -45,7 +68,7 @@ def _start_parent_watchdog_if_frozen() -> None:
         try:
             from panther.sidecar.parent_watchdog import start_parent_watchdog
 
-            start_parent_watchdog(interval=2.0)
+            start_parent_watchdog(interval=2.0, parent_pid=_read_parent_pid_env())
         except Exception:
             # Never fail startup due to watchdog issues
             pass

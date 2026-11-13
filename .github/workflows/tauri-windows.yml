@@ -118,6 +118,13 @@ jobs:
           PYTHONPATH: src
           QT_QPA_PLATFORM: offscreen
 
+      - name: Startup adapter tests (registry error mapping)
+        if: always()
+        run: python -m pytest -q --timeout=120 --timeout-method=thread tests/test_startup_adapter.py
+        env:
+          PYTHONPATH: src
+          QT_QPA_PLATFORM: offscreen
+
       # ----------------------------------------------------------------------
       # Build sidecar executable via PyInstaller
       # ----------------------------------------------------------------------
@@ -159,9 +166,21 @@ jobs:
           $p = [System.Diagnostics.Process]::Start($psi)
           $p.StandardInput.WriteLine($request)
           $p.StandardInput.Close()
-          $out = $p.StandardOutput.ReadToEnd()
-          $err = $p.StandardError.ReadToEnd()
-          if (-not $p.WaitForExit(60000)) { $p.Kill(); throw "sidecar smoke test timed out" }
+
+          # Drain stdout and stderr concurrently with async readers. Calling
+          # ReadToEnd() synchronously before WaitForExit() would block until the
+          # streams close, so a wedged child would hang the step for the whole
+          # job timeout instead of the intended 60s. Draining both streams in
+          # parallel also prevents a large stderr write from deadlocking the
+          # child against a full pipe buffer.
+          $outTask = $p.StandardOutput.ReadToEndAsync()
+          $errTask = $p.StandardError.ReadToEndAsync()
+          if (-not $p.WaitForExit(60000)) {
+            $p.Kill()
+            throw "sidecar smoke test timed out after 60s"
+          }
+          $out = $outTask.GetAwaiter().GetResult()
+          $err = $errTask.GetAwaiter().GetResult()
 
           Write-Host "Exit code: $($p.ExitCode)"
           Write-Host "Stdout: $out"
@@ -208,7 +227,9 @@ jobs:
       # Tauri build (NSIS installer)
       # ----------------------------------------------------------------------
       - name: Build Tauri app (NSIS)
-        run: npx --yes @tauri-apps/cli@^2 build
+        # Pin the CLI: `@^2` is a floating range, so a new 2.x release could
+        # change bundling behaviour between otherwise identical runs.
+        run: npx --yes @tauri-apps/cli@2.12.4 build
         env:
           CI: true
 
@@ -269,7 +290,12 @@ jobs:
           name: panther-nsis-installer
           path: src-tauri/target/release/bundle/nsis/*.exe
           retention-days: 7
-          if-no-files-found: error
+          # This step runs under `if: always()` so it also fires when an
+          # earlier step failed and the bundle was never produced. A missing
+          # artifact is then a consequence, not a second root cause — warn so
+          # the real failure is not obscured. `installer-verify` is gated on
+          # `needs: windows-tauri` and is skipped in that case anyway.
+          if-no-files-found: warn
 
       - name: Upload sidecar binary
         uses: actions/upload-artifact@v4
@@ -308,18 +334,31 @@ jobs:
             throw "No installer found in artifact"
           }
           Write-Host "Installing: $($installer.FullName)"
-          & $installer.FullName /S
-          Write-Host "Installer completed"
+          # PowerShell's call operator does NOT wait for GUI-subsystem
+          # executables. An NSIS installer is a GUI app, so `& $installer /S`
+          # returns immediately and the install races the discovery step.
+          # Start-Process -Wait blocks until the installer process exits.
+          $installProc = Start-Process -FilePath $installer.FullName -ArgumentList '/S' -Wait -PassThru
+          if ($installProc.ExitCode -ne 0) {
+            throw "Silent installer failed with exit code $($installProc.ExitCode)"
+          }
+          Write-Host "Installer completed (exit code 0)"
 
       - name: Locate installed app and sidecar
         shell: pwsh
         run: |
-          # Fixed paths first
+          # Fixed paths first.
+          # NOTE: "$env:ProgramFiles(x86)" is NOT valid — PowerShell parses the
+          # parenthesised suffix as a method call. Read it via the environment
+          # provider instead (the same token caused the original parse error).
+          $pf86 = [System.Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
           $appPaths = @(
             "$env:LOCALAPPDATA\Panther System Intelligence\Panther System Intelligence.exe",
-            "$env:PROGRAMFILES\Panther System Intelligence\Panther System Intelligence.exe",
-            "$env:PROGRAMFILES(x86)\Panther System Intelligence\Panther System Intelligence.exe"
+            "$env:PROGRAMFILES\Panther System Intelligence\Panther System Intelligence.exe"
           )
+          if ($pf86) {
+            $appPaths += "$pf86\Panther System Intelligence\Panther System Intelligence.exe"
+          }
           $appExe = $null
           foreach ($p in $appPaths) {
             if (Test-Path $p) {
@@ -330,7 +369,10 @@ jobs:
           # Recursive fallback search (max depth 5)
           if (-not $appExe) {
             $searchRoots = @($env:LOCALAPPDATA, $env:PROGRAMFILES)
-            if ($env:ProgramFiles(x86)) { $searchRoots += $env:ProgramFiles(x86) }
+            # "ProgramFiles(x86)" is not a valid PowerShell variable name; read
+            # it through the environment provider to avoid a parse error.
+            $pf86 = [System.Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
+            if ($pf86) { $searchRoots += $pf86 }
             foreach ($root in $searchRoots) {
               $found = Get-ChildItem -Path $root -Filter "Panther System Intelligence.exe" -Recurse -Depth 5 -ErrorAction SilentlyContinue |
                 Select-Object -First 1
@@ -431,11 +473,21 @@ jobs:
           Write-Host "Force killing app process..."
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
 
-          # Wait for watchdog to reap sidecar (longer wait for forced kill)
-          Start-Sleep -Seconds 5
+          # Wait for the watchdog to notice the app is gone and reap the
+          # sidecar. The watchdog watches PANTHER_PARENT_PID (the Tauri PID
+          # passed at spawn), not the PyInstaller bootloader, so it can still
+          # see the app disappear when the process tree survives the force
+          # kill. It polls at ~0.5s, so 30s is ample headroom; poll with a
+          # bound instead of a single snapshot so a slow runner is not
+          # mistaken for an orphan.
+          $deadline = (Get-Date).AddSeconds(30)
+          $orphans = $null
+          do {
+            Start-Sleep -Seconds 2
+            $orphans = Get-Process -Name "panther-sidecar*" -ErrorAction SilentlyContinue
+            if (-not $orphans) { break }
+          } while ((Get-Date) -lt $deadline)
 
-          # Check for any remaining sidecar processes
-          $orphans = Get-Process -Name "panther-sidecar*" -ErrorAction SilentlyContinue
           if ($orphans) {
             Write-Host "ORPHANED sidecar processes found after forced kill:"
             $orphans | ForEach-Object { Write-Host "  PID $($_.Id): $($_.Path)" }
@@ -446,12 +498,16 @@ jobs:
       - name: Run uninstaller
         shell: pwsh
         run: |
-          # Try to find and run the uninstaller
+          # Try to find and run the uninstaller.
+          # As above, "$env:ProgramFiles(x86)" is not valid PowerShell.
+          $pf86 = [System.Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
           $uninstallPaths = @(
             "$env:LOCALAPPDATA\Panther System Intelligence\uninstall.exe",
-            "$env:PROGRAMFILES\Panther System Intelligence\uninstall.exe",
-            "$env:PROGRAMFILES(x86)\Panther System Intelligence\uninstall.exe"
+            "$env:PROGRAMFILES\Panther System Intelligence\uninstall.exe"
           )
+          if ($pf86) {
+            $uninstallPaths += "$pf86\Panther System Intelligence\uninstall.exe"
+          }
           $uninstaller = $null
           foreach ($p in $uninstallPaths) {
             if (Test-Path $p) {
@@ -461,7 +517,11 @@ jobs:
           }
           if ($uninstaller) {
             Write-Host "Running uninstaller: $uninstaller"
-            & $uninstaller /S
+            # Same GUI-subsystem caveat as the installer: wait explicitly.
+            $uninstallProc = Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait -PassThru
+            if ($uninstallProc.ExitCode -ne 0) {
+              Write-Warning "Uninstaller exited with code $($uninstallProc.ExitCode)"
+            }
             Start-Sleep -Seconds 5
             Write-Host "Uninstaller completed"
           } else {
