@@ -229,6 +229,16 @@ def get_startup_apps() -> List[Dict[str, Any]]:
 
 def set_startup_app_state(executable: str, enabled: bool) -> None:
     """Enable or disable a startup entry."""
+    if enabled:
+        # Enabling is unsupported on every platform, so report that honestly
+        # before validating the entry. Disabling deletes the registry value,
+        # so an entry that was just disabled is no longer listed and a later
+        # lookup would otherwise produce a misleading "not found" error.
+        raise NotImplementedError(
+            "Enabling startup entries is not implemented. "
+            "Callers should store the command before deletion."
+        )
+
     entries = startup_adapter.get_startup_entries()
     target = None
     for entry in entries:
@@ -238,14 +248,7 @@ def set_startup_app_state(executable: str, enabled: bool) -> None:
     if not target:
         raise ValueError(f"Startup entry not found: {executable}")
 
-    if enabled:
-        # Not implemented on any platform currently
-        raise NotImplementedError(
-            "Enabling startup entries is not implemented. "
-            "Callers should store the command before deletion."
-        )
-    else:
-        startup_adapter.set_entry_enabled(target["name"], target["scope"], False)
+    startup_adapter.set_entry_enabled(target["name"], target["scope"], False)
 
 
 # ---------------------------------------------------------------------------

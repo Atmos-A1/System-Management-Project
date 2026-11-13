@@ -348,14 +348,10 @@ def test_method_system_monitor_set_startup_app_state(sidecar):
         apps = get_response["result"]
         if apps:
             exe = apps[0]["executable"]
-            # Test disable (should work on Windows)
-            disable_response = sidecar.call("system_monitor.set_startup_app_state", {
-                "executable": exe,
-                "enabled": False,
-            })
-            assert "jsonrpc" in disable_response
 
-            # Test enable - should return -32000 (NotImplementedError)
+            # Test enable FIRST - should return -32000 (NotImplementedError).
+            # Enabling is unsupported on every platform and raises before any
+            # registry mutation, so this is independent of entry state.
             enable_response = sidecar.call("system_monitor.set_startup_app_state", {
                 "executable": exe,
                 "enabled": True,
@@ -363,6 +359,15 @@ def test_method_system_monitor_set_startup_app_state(sidecar):
             assert "error" in enable_response
             assert enable_response["error"]["code"] == -32000
             assert "Unsupported on this platform" in enable_response["error"]["message"]
+
+            # Test disable (should work on Windows). Windows stores only
+            # enabled entries, so disable deletes the value and the entry is
+            # no longer listed afterwards - hence enable is checked above.
+            disable_response = sidecar.call("system_monitor.set_startup_app_state", {
+                "executable": exe,
+                "enabled": False,
+            })
+            assert "jsonrpc" in disable_response
         else:
             # No apps to test with
             pass
