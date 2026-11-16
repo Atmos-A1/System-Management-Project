@@ -1,6 +1,20 @@
-"""Build script for creating a debuggable Windows executable using PyInstaller.
+"""Build script for creating a debuggable Windows executable using PyInstaller (LEGACY).
 
-Strict specifications:
+================================================================================
+DEPRECATION NOTICE:
+================================================================================
+This script packages the LEGACY PySide6 UI. It is retained only as a fallback
+until the Tauri + React UI reaches feature parity and passes Windows acceptance.
+
+PRIMARY PACKAGING PATH:
+- Use `build_app.py` which invokes the Tauri CLI to produce an NSIS installer.
+- The Tauri workflow (`.github/workflows/tauri-windows.yml`) is the canonical
+  release pipeline.
+
+This legacy script will be removed once React UI parity is verified on Windows.
+================================================================================
+
+Strict specifications (legacy):
 - --onedir
 - --console (console output visible for diagnostics)
 - --noupx (prevents Qt6 DLL corruption)
@@ -14,11 +28,18 @@ from pathlib import Path
 import shutil
 
 def main() -> None:
+    print("=" * 78)
+    print("WARNING: This script builds the LEGACY PySide6 UI (deprecated).")
+    print("Primary packaging is now `python build_app.py` (Tauri + React + NSIS).")
+    print("This legacy path will be removed after React UI parity on Windows.")
+    print("=" * 78)
+
     project_root = Path(__file__).resolve().parent
-    entry_point = project_root / "run_panther.py"
+    # Use the legacy Qt entry point explicitly
+    entry_point = project_root / "run_panther_qt.py"
     
     if not entry_point.is_file():
-        sys.exit(f"Entry point not found: {entry_point}")
+        sys.exit(f"Legacy entry point not found: {entry_point}")
 
     # Clean previous build and dist to guarantee fresh compilation
     build_dir = project_root / "build"
@@ -59,7 +80,8 @@ def main() -> None:
     if not target_exe.is_file():
         sys.exit(f"Expected executable not found at: {target_exe}")
 
-    print(f"\n[BUILD SUCCESS] Executable created at: {target_exe}")
+    print(f"\n[BUILD SUCCESS] Legacy executable created at: {target_exe}")
+    print("NOTE: This is the LEGACY PySide6 build. Primary is `build_app.py`.")
 
 if __name__ == "__main__":
     main()

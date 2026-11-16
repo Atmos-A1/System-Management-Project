@@ -4,10 +4,10 @@
   "version": "0.1.0",
   "identifier": "com.panther.app",
   "build": {
-    "frontendDist": "../src-tauri/frontend/dist",
+    "frontendDist": "frontend/dist",
     "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeDevCommand": { "script": "npm run dev", "cwd": "frontend" },
+    "beforeBuildCommand": { "script": "npm run build", "cwd": "frontend" }
   },
   "app": {
     "windows": [
